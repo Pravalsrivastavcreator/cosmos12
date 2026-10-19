@@ -585,6 +585,13 @@ const BugArena = ({ onAbort }) => {
   const [reentryRequested, setReentryRequested] = useState(false);
   const [unlockGracePeriod, setUnlockGracePeriod] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [workspaceUnlocked, setWorkspaceUnlocked] = useState(() => {
+    try {
+      return sessionStorage.getItem('ba_workspace_unlocked') === 'true';
+    } catch {
+      return false;
+    }
+  });
   // Ref to hold the previous submission key when editing code after submit
   // (survives submittedKey being cleared to show the editor again)
   const pendingEditKeyRef = useRef(null);
@@ -632,6 +639,7 @@ const BugArena = ({ onAbort }) => {
         if (parsed.isLocked) setIsLocked(parsed.isLocked);
         if (parsed.activeCheatReportId) setActiveCheatReportId(parsed.activeCheatReportId);
         if (parsed.reentryRequested) setReentryRequested(parsed.reentryRequested);
+        if (parsed.workspaceUnlocked) setWorkspaceUnlocked(parsed.workspaceUnlocked);
         if (parsed.phase && parsed.phase !== 'admin') setPhase(parsed.phase);
 
         // Verify with server if this session has an active lock
@@ -667,6 +675,7 @@ const BugArena = ({ onAbort }) => {
         isLocked,
         activeCheatReportId,
         reentryRequested,
+        workspaceUnlocked,
       }));
     } catch { /* ignore */ }
   }, [teamName, registrationId, isRegistered, isSetup, language, phase, isLocked, activeCheatReportId, reentryRequested]);
@@ -852,6 +861,7 @@ const BugArena = ({ onAbort }) => {
   const getFullscreenElement = useCallback(() => {
     return document.fullscreenElement ||
       document.webkitFullscreenElement ||
+      document.webkitCurrentFullScreenElement ||
       document.mozFullScreenElement ||
       document.msFullscreenElement ||
       null;
@@ -859,6 +869,10 @@ const BugArena = ({ onAbort }) => {
 
   // Safe cross-browser enter fullscreen
   const enterFullscreenMode = useCallback(async () => {
+    setWorkspaceUnlocked(true);
+    setIsFullscreen(true);
+    try { sessionStorage.setItem('ba_workspace_unlocked', 'true'); } catch {}
+
     const el = document.documentElement;
     const rfs = el.requestFullscreen ||
       el.webkitRequestFullscreen ||
@@ -874,21 +888,29 @@ const BugArena = ({ onAbort }) => {
         console.warn('Native requestFullscreen failed:', err);
         // Fallback: browser security policy / user gesture blocked native fullscreen
         setIsFullscreen(true);
-        showToast('Native fullscreen restricted by browser. Unlocked in workspace mode.', 'info');
+        showToast('Workspace unlocked in windowed mode.', 'info');
         return false;
       }
     } else {
       // Browser does not support HTML5 Fullscreen (e.g. some mobile/embedded webviews)
       setIsFullscreen(true);
-      showToast('Fullscreen API unavailable on this browser. Unlocked in workspace mode.', 'info');
+      showToast('Fullscreen API unavailable. Workspace unlocked in standard mode.', 'info');
       return false;
     }
   }, []);
 
+  const handleUnlockWorkspace = useCallback(async () => {
+    setWorkspaceUnlocked(true);
+    setIsFullscreen(true);
+    try { sessionStorage.setItem('ba_workspace_unlocked', 'true'); } catch {}
+    await enterFullscreenMode();
+  }, [enterFullscreenMode]);
+
   // Track real fullscreen state with all browser vendor events
   useEffect(() => {
     const onFsChange = () => {
-      setIsFullscreen(!!getFullscreenElement());
+      const isFs = !!getFullscreenElement();
+      setIsFullscreen(isFs);
     };
     const events = ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'];
     events.forEach(evt => document.addEventListener(evt, onFsChange));
@@ -900,11 +922,11 @@ const BugArena = ({ onAbort }) => {
   // Auto-request fullscreen when coding phase starts
   useEffect(() => {
     const shouldBeFullscreen = isSetup && isRegistered && !isAdminLoggedIn &&
-      (phase === 'create' || phase === 'hunt') && !isLocked;
+      (phase === 'create' || phase === 'hunt') && !isLocked && !workspaceUnlocked;
     if (shouldBeFullscreen && !isFullscreen) {
       enterFullscreenMode().catch(() => {});
     }
-  }, [isSetup, isRegistered, phase, isAdminLoggedIn, isLocked, isFullscreen, enterFullscreenMode]);
+  }, [isSetup, isRegistered, phase, isAdminLoggedIn, isLocked, isFullscreen, workspaceUnlocked, enterFullscreenMode]);
 
   // Register active contest session with server (so mid-contest reload/exit is tracked)
   useEffect(() => {
@@ -1388,8 +1410,8 @@ const BugArena = ({ onAbort }) => {
   // Uses a stable team-based slot key so re-submissions UPSERT the same entry
   // (admin panel always shows only the LATEST version)
   const handleSubmitCode = async (isAutoSubmit = false) => {
-    if (!isAutoSubmit && !isFullscreen) {
-      showToast('Fullscreen mode is mandatory to write or submit code!', 'error');
+    if (!isAutoSubmit && !isFullscreen && !workspaceUnlocked) {
+      showToast('Please unlock the coding workspace before submitting!', 'error');
       return;
     }
     if (!code.trim()) {
@@ -2750,7 +2772,7 @@ const BugArena = ({ onAbort }) => {
             </div>
           </div>
         </div>
-      ) : !isFullscreen ? (
+      ) : (!isFullscreen && !workspaceUnlocked) ? (
         /* Fullscreen Hard Lock: The entire writing & submission workspace is locked */
         <div className="ba-fade-in" style={{
           display: 'flex',
@@ -2792,8 +2814,8 @@ const BugArena = ({ onAbort }) => {
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.75rem', marginTop: '0.4rem' }}>
             <button
               className="ba-neon-btn ba-btn-yellow"
-              style={{ fontSize: '1rem', padding: '0.85rem 2rem', display: 'flex', alignItems: 'center', gap: '0.6rem' }}
-              onClick={enterFullscreenMode}
+              style={{ fontSize: '1rem', padding: '0.85rem 2rem', display: 'flex', alignItems: 'center', gap: '0.6rem', cursor: 'pointer' }}
+              onClick={handleUnlockWorkspace}
             >
               <span style={{ fontSize: '1.2rem' }}>⛶</span>
               <span>Enter Fullscreen Mode to Unlock</span>
@@ -2801,8 +2823,10 @@ const BugArena = ({ onAbort }) => {
             <button
               type="button"
               onClick={() => {
+                setWorkspaceUnlocked(true);
                 setIsFullscreen(true);
-                showToast('Unlocked in workspace window mode. Please keep the contest tab active!', 'info');
+                try { sessionStorage.setItem('ba_workspace_unlocked', 'true'); } catch {}
+                showToast('Workspace unlocked in windowed mode. Please keep the contest tab active!', 'info');
               }}
               style={{
                 background: 'transparent',
@@ -2900,11 +2924,11 @@ const BugArena = ({ onAbort }) => {
             <button
               className="ba-neon-btn ba-btn-yellow"
               onClick={handleSubmitCode}
-              disabled={!code.trim() || createdBugs.filter(b => b.description.trim()).length === 0 || isSubmitting || !isFullscreen}
-              title={!isFullscreen ? 'Enter fullscreen to submit your code' : ''}
+              disabled={!code.trim() || createdBugs.filter(b => b.description.trim()).length === 0 || isSubmitting || (!isFullscreen && !workspaceUnlocked)}
+              title={(!isFullscreen && !workspaceUnlocked) ? 'Enter fullscreen or unlock workspace to submit your code' : ''}
             >
               <span className="ba-btn-icon">⚡</span>
-              {isSubmitting ? 'Submitting & Encrypting...' : !isFullscreen ? '🔒 Fullscreen Required to Submit' : 'Submit Bug Code'}
+              {isSubmitting ? 'Submitting & Encrypting...' : (!isFullscreen && !workspaceUnlocked) ? '🔒 Fullscreen Required to Submit' : 'Submit Bug Code'}
             </button>
             <button
               className="ba-neon-btn ba-btn-cyan"
