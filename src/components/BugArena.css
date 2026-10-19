@@ -852,7 +852,7 @@
   min-height: 100%;
   padding: 1rem;
   margin: 0;
-  font-family: 'Courier New', monospace;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
   font-size: 1.05rem;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -868,6 +868,15 @@
   z-index: 1;
 }
 
+/* Direct ultra-fast native typing mode with 0ms latency */
+.ba-code-textarea.ba-direct-typing {
+  color: #f8f8f2 !important;
+  background: rgba(10, 12, 24, 0.95);
+  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+  font-size: 1.02rem;
+  line-height: 1.6;
+}
+
 .ba-code-textarea::placeholder {
   color: #a0a0c5;
 }
@@ -879,15 +888,15 @@
   cursor: default;
 }
 
-/* ─── Syntax highlighting colors ──────────────────────────────────────────── */
-.syn-keyword { color: #ff79c6; font-weight: 700; text-shadow: 0 0 8px rgba(255, 121, 198, 0.3); }
-.syn-string { color: #50fa7b; text-shadow: 0 0 6px rgba(80, 250, 123, 0.25); }
+/* ─── Syntax highlighting colors (Optimized: Removed blur text-shadow for 60fps typing) ─── */
+.syn-keyword { color: #ff79c6; font-weight: 700; }
+.syn-string { color: #50fa7b; }
 .syn-comment { color: #6272a4; font-style: italic; }
-.syn-number { color: #ffb86c; text-shadow: 0 0 6px rgba(255, 184, 108, 0.25); }
-.syn-function { color: #8be9fd; text-shadow: 0 0 6px rgba(139, 233, 253, 0.25); }
+.syn-number { color: #ffb86c; }
+.syn-function { color: #8be9fd; }
 .syn-operator { color: #ff79c6; }
-.syn-type { color: #bd93f9; text-shadow: 0 0 6px rgba(189, 147, 249, 0.25); }
-.syn-bracket { color: #f1fa8c; text-shadow: 0 0 6px rgba(241, 250, 140, 0.2); }
+.syn-type { color: #bd93f9; }
+.syn-bracket { color: #f1fa8c; }
 .syn-punctuation { color: #ff79c6; }
 
 /* ─── Editor Footer Actions ───────────────────────────────────────────────── */

@@ -63,7 +63,7 @@ const COMMENT_PATTERNS = {
   default: { line: '//', blockStart: '/*', blockEnd: '*/' },
 };
 
-// ─── Syntax Highlighter (Token-based) ───────────────────────────────────────
+// ─── Syntax Highlighter (Token-based, linear-time & optimized) ─────────────
 const highlightCode = (code, language) => {
   if (!code) return '';
 
@@ -76,12 +76,10 @@ const highlightCode = (code, language) => {
   const keywords = new Set(LANGUAGE_KEYWORDS[language] || LANGUAGE_KEYWORDS.javascript);
   const commentConfig = COMMENT_PATTERNS[language] || COMMENT_PATTERNS.default;
 
-  let tokenRegex;
-  if (commentConfig.line === '#') {
-    tokenRegex = /(\#[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b\d+\.?\d*\b|\b[A-Za-z_#][A-Za-z0-9_]*\b|[{}[\]()])/g;
-  } else {
-    tokenRegex = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b\d+\.?\d*\b|\b[A-Za-z_#][A-Za-z0-9_]*\b|[{}[\]()])/g;
-  }
+  // Linear regex that prevents catastrophic backtracking on unclosed quotes/strings
+  const tokenRegex = commentConfig.line === '#'
+    ? /(\#[^\n]*|\/\*[\s\S]*?\*\/|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`|\b\d+\.?\d*\b|\b[A-Za-z_#][A-Za-z0-9_]*\b|[{}[\]()])/g
+    : /(\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`|\b\d+\.?\d*\b|\b[A-Za-z_#][A-Za-z0-9_]*\b|[{}[\]()])/g;
 
   let result = '';
   let lastIndex = 0;
@@ -127,7 +125,7 @@ const NeonParticles = React.memo(() => {
 
   const initParticles = useCallback((canvas) => {
     const particles = [];
-    const count = Math.floor((canvas.width * canvas.height) / 18000);
+    const count = Math.min(30, Math.floor((canvas.width * canvas.height) / 25000));
     for (let i = 0; i < count; i++) {
       const colors = ['#ff6b6b', '#00ffff', '#9d4edd', '#4ade80', '#f59e0b'];
       particles.push({
@@ -186,8 +184,6 @@ const NeonParticles = React.memo(() => {
 
         ctx.save();
         ctx.globalAlpha = currentOpacity;
-        ctx.shadowColor = p.color;
-        ctx.shadowBlur = 12;
         ctx.fillStyle = p.color;
         ctx.beginPath();
         ctx.arc(p.x, p.y, currentSize, 0, Math.PI * 2);
@@ -233,8 +229,9 @@ const Toast = ({ message, type = 'success', onDone }) => {
 };
 
 // ─── Code Editor Component ──────────────────────────────────────────────────
-const CodeEditor = React.memo(({ code, onChange, language, readOnly = false, teamInfo = null }) => {
+const CodeEditor = React.memo(({ code, onChange, language, readOnly = false, teamInfo = null, highlightLine = null }) => {
   const [localCode, setLocalCode] = useState(code || '');
+  const [editorMode, setEditorMode] = useState('direct'); // 'direct' (instant native typing) | 'glow' (syntax overlay)
   const textareaRef = useRef(null);
   const highlightRef = useRef(null);
   const lineNumbersRef = useRef(null);
@@ -246,12 +243,12 @@ const CodeEditor = React.memo(({ code, onChange, language, readOnly = false, tea
     }
   }, [code, readOnly]);
 
-  // Debounce sending code back to parent to avoid massive re-renders
+  // Debounce sending code back to parent (1200ms) to avoid heavy parent re-renders while typing
   useEffect(() => {
     if (readOnly) return;
     const handler = setTimeout(() => {
       onChange(localCode);
-    }, 300);
+    }, 1200);
     return () => clearTimeout(handler);
   }, [localCode, onChange, readOnly]);
 
@@ -259,14 +256,32 @@ const CodeEditor = React.memo(({ code, onChange, language, readOnly = false, tea
   const lineCount = lines.length;
 
   const highlightedHtml = React.useMemo(() => {
+    if (!readOnly && editorMode === 'direct') return '';
     return highlightCode(localCode, language) + '\n';
-  }, [localCode, language]);
+  }, [localCode, language, readOnly, editorMode]);
 
   const lineNumbers = React.useMemo(() => {
-    return Array.from({ length: lineCount }, (_, i) => (
-      <span key={i} className="ba-line-num">{i + 1}</span>
-    ));
-  }, [lineCount]);
+    return Array.from({ length: lineCount }, (_, i) => {
+      const isTarget = highlightLine && (i + 1 === Number(highlightLine));
+      return (
+        <span
+          key={i}
+          className="ba-line-num"
+          style={isTarget ? {
+            background: 'rgba(0, 255, 255, 0.35)',
+            color: '#00ffff',
+            fontWeight: 900,
+            borderRadius: '4px',
+            border: '1px solid #00ffff',
+            padding: '0 4px',
+            boxShadow: '0 0 8px rgba(0, 255, 255, 0.6)'
+          } : undefined}
+        >
+          {i + 1}
+        </span>
+      );
+    });
+  }, [lineCount, highlightLine]);
 
   const handleScroll = () => {
     if (textareaRef.current && highlightRef.current) {
@@ -281,6 +296,12 @@ const CodeEditor = React.memo(({ code, onChange, language, readOnly = false, tea
   const handleInput = (e) => {
     if (!readOnly) {
       setLocalCode(e.target.value);
+    }
+  };
+
+  const handleBlur = () => {
+    if (!readOnly) {
+      onChange(localCode);
     }
   };
 
@@ -314,9 +335,55 @@ const CodeEditor = React.memo(({ code, onChange, language, readOnly = false, tea
             ? `${teamInfo.team} — buggy_code${langObj.ext}`
             : `bug-arena — code${langObj.ext}`}
         </div>
-        <div className="ba-editor-lang-badge">
-          <span className="ba-lang-dot" />
-          {langObj.name}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+          {!readOnly && (
+            <div style={{ display: 'flex', background: 'rgba(0, 0, 0, 0.45)', borderRadius: '6px', padding: '2px', border: '1px solid rgba(255,255,255,0.1)' }}>
+              <button
+                type="button"
+                onClick={() => setEditorMode('direct')}
+                title="Ultra-fast native typing (0ms latency)"
+                style={{
+                  background: editorMode === 'direct' ? 'rgba(0,255,255,0.2)' : 'transparent',
+                  color: editorMode === 'direct' ? '#00ffff' : '#8888aa',
+                  border: 'none',
+                  borderRadius: '4px',
+                  padding: '2px 8px',
+                  fontSize: '0.72rem',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                }}
+              >
+                ⚡ Ultra-Fast
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditorMode('glow')}
+                title="Syntax color glow mode"
+                style={{
+                  background: editorMode === 'glow' ? 'rgba(157,78,221,0.25)' : 'transparent',
+                  color: editorMode === 'glow' ? '#c77dff' : '#8888aa',
+                  border: 'none',
+                  borderRadius: '4px',
+                  padding: '2px 8px',
+                  fontSize: '0.72rem',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                }}
+              >
+                🎨 Syntax Glow
+              </button>
+            </div>
+          )}
+          <div className="ba-editor-lang-badge">
+            <span className="ba-lang-dot" />
+            {langObj.name}
+          </div>
         </div>
       </div>
 
@@ -337,16 +404,19 @@ const CodeEditor = React.memo(({ code, onChange, language, readOnly = false, tea
           {lineNumbers}
         </div>
         <div className="ba-code-container">
-          <pre
-            ref={highlightRef}
-            className="ba-code-highlight"
-            dangerouslySetInnerHTML={{ __html: highlightedHtml }}
-          />
+          {(readOnly || editorMode === 'glow') && (
+            <pre
+              ref={highlightRef}
+              className="ba-code-highlight"
+              dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+            />
+          )}
           <textarea
             ref={textareaRef}
-            className={`ba-code-textarea ${readOnly ? 'ba-code-readonly' : ''}`}
+            className={`ba-code-textarea ${readOnly ? 'ba-code-readonly' : ''} ${!readOnly && editorMode === 'direct' ? 'ba-direct-typing' : ''}`}
             value={localCode}
             onChange={handleInput}
+            onBlur={handleBlur}
             onScroll={handleScroll}
             onKeyDown={handleTab}
             readOnly={readOnly}
@@ -364,6 +434,11 @@ const CodeEditor = React.memo(({ code, onChange, language, readOnly = false, tea
           <span>📄 {lineCount} lines</span>
           <span>🔤 {localCode.length} chars</span>
           <span>💻 {langObj.name}</span>
+          {!readOnly && (
+            <span style={{ color: editorMode === 'direct' ? '#00ffff' : '#c77dff', fontSize: '0.7rem' }}>
+              {editorMode === 'direct' ? '⚡ 0ms latency typing' : '🎨 Syntax glow active'}
+            </span>
+          )}
         </div>
       </div>
     </div>
@@ -494,6 +569,14 @@ const BugArena = ({ onAbort }) => {
   const [isVerifying, setIsVerifying] = useState('');
   const [expandedReg, setExpandedReg] = useState(null);
   const [adminNoteInput, setAdminNoteInput] = useState('');
+  const [compareLangFilter, setCompareLangFilter] = useState('all');
+  const [compareStatusFilter, setCompareStatusFilter] = useState('all'); // 'all' | 'pending' | 'decided' | 'spam'
+  const [compareSearchQuery, setCompareSearchQuery] = useState('');
+  const [expandedAiDossier, setExpandedAiDossier] = useState({});
+  const [bugOverrides, setBugOverrides] = useState({});
+  const [activeCodeInspector, setActiveCodeInspector] = useState({}); // { [reportId]: boolean }
+  const [highlightedCodeLine, setHighlightedCodeLine] = useState({}); // { [reportId]: lineNumber }
+  const [showTrackLeaderboard, setShowTrackLeaderboard] = useState(false);
 
   // Proctoring Mode State
   const [cheatWarnings, setCheatWarnings] = useState(0);
@@ -765,23 +848,63 @@ const BugArena = ({ onAbort }) => {
     return () => window.removeEventListener('keydown', handleKeyCombo);
   }, [isAdminLoggedIn]);
 
-  // Track real fullscreen state
+  // Helper for cross-browser fullscreen element
+  const getFullscreenElement = useCallback(() => {
+    return document.fullscreenElement ||
+      document.webkitFullscreenElement ||
+      document.mozFullScreenElement ||
+      document.msFullscreenElement ||
+      null;
+  }, []);
+
+  // Safe cross-browser enter fullscreen
+  const enterFullscreenMode = useCallback(async () => {
+    const el = document.documentElement;
+    const rfs = el.requestFullscreen ||
+      el.webkitRequestFullscreen ||
+      el.mozRequestFullScreen ||
+      el.msRequestFullscreen;
+
+    if (rfs) {
+      try {
+        await rfs.call(el);
+        setIsFullscreen(true);
+        return true;
+      } catch (err) {
+        console.warn('Native requestFullscreen failed:', err);
+        // Fallback: browser security policy / user gesture blocked native fullscreen
+        setIsFullscreen(true);
+        showToast('Native fullscreen restricted by browser. Unlocked in workspace mode.', 'info');
+        return false;
+      }
+    } else {
+      // Browser does not support HTML5 Fullscreen (e.g. some mobile/embedded webviews)
+      setIsFullscreen(true);
+      showToast('Fullscreen API unavailable on this browser. Unlocked in workspace mode.', 'info');
+      return false;
+    }
+  }, []);
+
+  // Track real fullscreen state with all browser vendor events
   useEffect(() => {
     const onFsChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
+      setIsFullscreen(!!getFullscreenElement());
     };
-    document.addEventListener('fullscreenchange', onFsChange);
-    return () => document.removeEventListener('fullscreenchange', onFsChange);
-  }, []);
+    const events = ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'];
+    events.forEach(evt => document.addEventListener(evt, onFsChange));
+    return () => {
+      events.forEach(evt => document.removeEventListener(evt, onFsChange));
+    };
+  }, [getFullscreenElement]);
 
   // Auto-request fullscreen when coding phase starts
   useEffect(() => {
     const shouldBeFullscreen = isSetup && isRegistered && !isAdminLoggedIn &&
       (phase === 'create' || phase === 'hunt') && !isLocked;
     if (shouldBeFullscreen && !isFullscreen) {
-      document.documentElement.requestFullscreen?.().catch(() => {});
+      enterFullscreenMode().catch(() => {});
     }
-  }, [isSetup, isRegistered, phase, isAdminLoggedIn, isLocked, isFullscreen]);
+  }, [isSetup, isRegistered, phase, isAdminLoggedIn, isLocked, isFullscreen, enterFullscreenMode]);
 
   // Register active contest session with server (so mid-contest reload/exit is tracked)
   useEffect(() => {
@@ -951,6 +1074,13 @@ const BugArena = ({ onAbort }) => {
       ]);
       const data = await res.json();
       setAdminRegistryData(data || {});
+      if (data?.verifications) {
+        const loadedOverrides = {};
+        Object.entries(data.verifications).forEach(([repId, v]) => {
+          if (v && v.overrides) loadedOverrides[repId] = v.overrides;
+        });
+        setBugOverrides(prev => ({ ...loadedOverrides, ...prev }));
+      }
       const regData = await regRes.json();
       setAdminRegistrations(Array.isArray(regData) ? regData : []);
       const statsData = await statsRes.json();
@@ -977,7 +1107,16 @@ const BugArena = ({ onAbort }) => {
         ]);
         
         const data = await res.json();
-        if (data) setAdminRegistryData(data);
+        if (data) {
+          setAdminRegistryData(data);
+          if (data.verifications) {
+            const loadedOverrides = {};
+            Object.entries(data.verifications).forEach(([repId, v]) => {
+              if (v && v.overrides) loadedOverrides[repId] = v.overrides;
+            });
+            setBugOverrides(prev => ({ ...loadedOverrides, ...prev }));
+          }
+        }
 
         const regData = await regRes.json();
         if (Array.isArray(regData)) setAdminRegistrations(regData);
@@ -1492,57 +1631,433 @@ const BugArena = ({ onAbort }) => {
     setReportSubmitted(true);
   };
 
-  // ── Automated Bug Matcher Algorithm ──
-  const evaluateBugMatch = (hunterReport, creatorTeamData) => {
-    if (!hunterReport || !creatorTeamData) {
-      return { status: 'MISMATCH', score: 0, label: '🔴 MISMATCH', details: 'Insufficient comparison data' };
+  // ── Multi-Factor Semantic & Intent Bug Matching Engine ──
+  const BUG_CATEGORIES = {
+    INDEX_BOUNDS: {
+      name: 'Index & Array Bounds / Off-by-One',
+      icon: '📏',
+      keywords: ['index', 'bound', 'bounds', 'array', 'list', 'length', 'size', 'len', 'off-by-one', 'oob', 'subscript', 'element', 'position', 'out of range', 'indexerror', 'arrayindexoutofbounds', 'stringindexoutofbounds', 'overflow', 'slice', 'iteration', 'exceeds', 'last element'],
+    },
+    NULL_REFERENCE: {
+      name: 'Null / Undefined Pointer Dereference',
+      icon: '🚫',
+      keywords: ['null', 'none', 'nil', 'nullpointer', 'npe', 'pointer', 'dereference', 'empty', 'undefined', 'segfault', 'nonetype', 'nullpointerexception', 'unassigned', 'uninitialized', 'missing object', 'null check'],
+    },
+    INFINITE_LOOP: {
+      name: 'Infinite Loop & Termination Flaw',
+      icon: '🔄',
+      keywords: ['loop', 'while', 'for', 'iterate', 'iteration', 'infinite', 'termination', 'condition', 'counter', 'increment', 'decrement', 'hangs', 'stuck', 'forever', 'never terminates', 'never ends', 'while true', 'infinite recursion'],
+    },
+    SYNTAX_STRUCTURE: {
+      name: 'Syntax, Punctuation & Bracket Error',
+      icon: '🔣',
+      keywords: ['syntax', 'semicolon', 'colon', 'paren', 'parenthesis', 'bracket', 'brace', 'indent', 'indentation', 'quote', 'comma', 'unclosed', 'missing colon', 'missing semicolon', 'curly', 'indentationerror', 'parse error'],
+    },
+    LOGIC_OPERATOR: {
+      name: 'Logical Operator & Inverted Condition',
+      icon: '🔀',
+      keywords: ['logic', 'condition', 'boolean', 'operator', 'inverted', 'reversed', 'wrong condition', 'equals', 'equality', 'comparison', 'and/or', 'greater', 'less', '<=', '>=', '!=', '==', '===', 'negation', 'if statement', 'branch', 'wrong operator', 'inverted check'],
+    },
+    VARIABLE_SCOPE: {
+      name: 'Variable Typo, Scope & Undeclared Name',
+      icon: '🏷️',
+      keywords: ['variable', 'var', 'identifier', 'name', 'naming', 'misspelled', 'typo', 'undefined', 'undeclared', 'scope', 'reference', 'shadowing', 'nameerror', 'unbound', 'local', 'global', 'wrong variable'],
+    },
+    MATH_ARITHMETIC: {
+      name: 'Math, Arithmetic & Division by Zero',
+      icon: '➗',
+      keywords: ['math', 'calculation', 'divide', 'division', 'zero', 'overflow', 'underflow', 'modulo', 'sign', 'negative', 'sum', 'multiply', 'zerodivisionerror', 'arithmeticexception', 'precision', 'float', 'divide by zero'],
+    },
+    TYPE_MISMATCH: {
+      name: 'Data Type Mismatch & Casting Error',
+      icon: '🔤',
+      keywords: ['type', 'cast', 'datatype', 'string', 'int', 'integer', 'float', 'double', 'conversion', 'incompatible', 'parse', 'typeerror', 'classcastexception', 'numberformatexception', 'type error', 'cannot convert'],
+    },
+    RETURN_BEHAVIOR: {
+      name: 'Missing, Void or Early Return',
+      icon: '↩️',
+      keywords: ['return', 'output', 'missing return', 'void', 'early return', 'result', 'yield', 'exit', 'no return', 'unreachable', 'dead code', 'wrong return value'],
+    },
+    RECURSION_BASE: {
+      name: 'Recursion Base Case & Stack Overflow',
+      icon: '🧱',
+      keywords: ['recursion', 'recursive', 'base case', 'stack overflow', 'stackoverflowerror', 'maximum recursion', 'recursionerror', 'deep recursion', 'missing base case'],
+    },
+    RESOURCE_IO: {
+      name: 'Resource Leak, File & Stream Error',
+      icon: '📁',
+      keywords: ['file', 'stream', 'close', 'closed', 'socket', 'leak', 'unclosed', 'resource', 'ioexception', 'filenotfound', 'buffer', 'flush', 'connection'],
+    },
+    IMPORT_MODULE: {
+      name: 'Module Import & Dependency Error',
+      icon: '📦',
+      keywords: ['import', 'module', 'package', 'library', 'dependency', 'include', 'require', 'modulenotfounderror', 'cannot find symbol'],
+    },
+  };
+
+  const STOPWORDS = new Set([
+    'the', 'is', 'in', 'at', 'of', 'a', 'an', 'this', 'that', 'on', 'with', 'for', 'to', 'by', 'it', 'as', 'be', 'we',
+    'have', 'has', 'do', 'does', 'from', 'but', 'not', 'are', 'was', 'were', 'been', 'there', 'their', 'they', 'what',
+    'which', 'who', 'when', 'where', 'why', 'how', 'code', 'bug', 'line', 'here', 'error', 'found', 'problem', 'instead',
+    'team', 'please', 'check', 'fix', 'should', 'could', 'would', 'will', 'must', 'can', 'may'
+  ]);
+
+  const extractLineNumbers = (val) => {
+    if (!val) return [];
+    const matches = val.toString().match(/\b\d+\b/g);
+    return matches ? [...new Set(matches.map(Number))] : [];
+  };
+
+  const calculateLineProximity = (hLines, cLines) => {
+    if (hLines.length === 0 || cLines.length === 0) return 0.35;
+    let minDiff = Infinity;
+    for (const h of hLines) {
+      for (const c of cLines) {
+        const diff = Math.abs(h - c);
+        if (diff < minDiff) minDiff = diff;
+      }
     }
+    if (minDiff === 0) return 1.0;     // exact same line
+    if (minDiff === 1) return 0.90;    // adjacent line (off-by-1)
+    if (minDiff === 2) return 0.80;    // 2 lines away (inside same statement/loop)
+    if (minDiff <= 4) return 0.65;     // 3-4 lines away (same block)
+    if (minDiff <= 7) return 0.40;     // same function
+    return 0.15;
+  };
+
+  const tokenizeClean = (str) => {
+    if (!str) return [];
+    return str
+      .toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length > 2 && !STOPWORDS.has(w));
+  };
+
+  const detectBugCategory = (text) => {
+    if (!text) return null;
+    const lower = text.toLowerCase();
+    let bestCat = null;
+    let maxMatches = 0;
+
+    Object.entries(BUG_CATEGORIES).forEach(([catKey, catObj]) => {
+      let matches = 0;
+      catObj.keywords.forEach(kw => {
+        if (kw.includes(' ') && lower.includes(kw)) {
+          matches += 3; // Multi-word phrases carry strong weight
+        } else if (lower.includes(kw)) {
+          matches += 1;
+        }
+      });
+      if (matches > maxMatches) {
+        maxMatches = matches;
+        bestCat = catKey;
+      }
+    });
+
+    return maxMatches >= 1 ? bestCat : null;
+  };
+
+  const computeSemanticSimilarity = (hDesc, cDesc) => {
+    const hRaw = (hDesc || '').toLowerCase().trim();
+    const cRaw = (cDesc || '').toLowerCase().trim();
+    if (!hRaw || !cRaw) return 0;
+
+    const hTokens = tokenizeClean(hDesc);
+    const cTokens = tokenizeClean(cDesc);
+
+    // Exact phrase or substring match boost
+    let substringScore = 0;
+    if (hRaw.includes(cRaw) || cRaw.includes(hRaw)) {
+      substringScore = 0.55;
+    }
+
+    // Direct token overlap
+    let directMatches = 0;
+    for (const ht of hTokens) {
+      if (cTokens.includes(ht)) directMatches++;
+    }
+    const minTokens = Math.min(hTokens.length, cTokens.length) || 1;
+    const tokenScore = Math.min(1.0, directMatches / minTokens);
+
+    // Category Alignment (solves concise 1-liner vs verbose descriptions)
+    const hCat = detectBugCategory(hDesc);
+    const cCat = detectBugCategory(cDesc);
+    const categoryAligned = (hCat && cCat && hCat === cCat);
+    const categoryScore = categoryAligned ? 0.90 : 0;
+
+    return Math.min(1.0, (tokenScore * 0.35) + (categoryScore * 0.45) + substringScore);
+  };
+
+  const extractCodeContextWindow = (code, lines) => {
+    if (!code || lines.length === 0) return { snippet: '', identifiers: [] };
+    const codeLines = code.split('\n');
+    const minLine = Math.max(1, Math.min(...lines) - 2);
+    const maxLine = Math.min(codeLines.length, Math.max(...lines) + 2);
+    
+    const snippetLines = [];
+    for (let i = minLine; i <= maxLine; i++) {
+      if (codeLines[i - 1] !== undefined) {
+        snippetLines.push(codeLines[i - 1]);
+      }
+    }
+    const snippet = snippetLines.join(' ');
+    // Extract programming identifiers (var names, functions)
+    const identifiers = snippet
+      .replace(/[^\w]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length >= 2 && !STOPWORDS.has(w.toLowerCase()));
+
+    return { snippet: snippet.toLowerCase(), identifiers: [...new Set(identifiers)] };
+  };
+
+  const computeDeepBugAnalysis = (hunterReport, creatorTeamData, overrides = {}) => {
+    const emptyResult = {
+      pairs: [],
+      unmatchedHunterBugs: [],
+      missedCreatorBugs: [],
+      verifiedCount: 0,
+      hunterBonusCount: 0,
+      acceptedBonusCount: 0,
+      falsePositiveCount: 0,
+      precisionRate: 0,
+      isHighSpam: false,
+      hunterScore: 0,
+      creatorScore: 0,
+      recommendedWinner: 'None',
+      recommendationReason: 'Insufficient data for comparison',
+      status: 'NO_DATA',
+    };
+
+    if (!hunterReport) return emptyResult;
 
     const hunterBugs = hunterReport.foundBugs || [];
-    const creatorBugs = creatorTeamData.createdBugs || [];
+    const creatorBugs = (creatorTeamData?.createdBugs?.length > 0)
+      ? creatorTeamData.createdBugs
+      : (hunterReport.originalCreatedBugs || []);
+    const originalCode = creatorTeamData?.code || hunterReport.originalCode || '';
 
-    if (hunterBugs.length === 0 || creatorBugs.length === 0) {
-      return { status: 'MISMATCH', score: 0, label: '🔴 MISMATCH', details: 'No bug items registered for comparison' };
-    }
+    if (hunterBugs.length === 0 && creatorBugs.length === 0) return emptyResult;
 
-    let perfectMatches = 0;
-    let partialMatches = 0;
+    // Build candidate pair scoring matrix
+    const candidates = [];
+    hunterBugs.forEach((hBug, hIdx) => {
+      const hLines = extractLineNumbers(hBug.lineNumber);
+      const hCategory = detectBugCategory(hBug.description);
+      const hTokens = tokenizeClean(hBug.description);
 
-    hunterBugs.forEach(hBug => {
-      const hLine = (hBug.lineNumber || '').toString().trim();
-      const hDesc = (hBug.description || '').toLowerCase();
+      creatorBugs.forEach((cBug, cIdx) => {
+        const cLines = extractLineNumbers(cBug.lineNumber);
+        const cCategory = detectBugCategory(cBug.description);
+        const cTokens = tokenizeClean(cBug.description);
 
-      creatorBugs.forEach(cBug => {
-        const cLine = (cBug.lineNumber || '').toString().trim();
-        const cDesc = (cBug.description || '').toLowerCase();
+        const lineScore = calculateLineProximity(hLines, cLines);
+        const semanticScore = computeSemanticSimilarity(hBug.description, cBug.description);
 
-        const lineMatch = hLine && cLine && (hLine === cLine || hLine.includes(cLine) || cLine.includes(hLine));
-
-        const hWords = hDesc.split(/\W+/).filter(w => w.length > 3);
-        const cWords = cDesc.split(/\W+/).filter(w => w.length > 3);
-        const wordMatchCount = hWords.filter(w => cWords.includes(w)).length;
-
-        if (lineMatch && wordMatchCount >= 1) {
-          perfectMatches++;
-        } else if (lineMatch || wordMatchCount >= 2) {
-          partialMatches++;
+        // Check code context anchors around the combined lines
+        const targetLines = [...hLines, ...cLines];
+        const { snippet, identifiers } = extractCodeContextWindow(originalCode, targetLines);
+        
+        let anchorScore = 0.4;
+        let matchedAnchor = null;
+        if (identifiers.length > 0) {
+          const hHasAnchor = identifiers.find(id => hTokens.includes(id.toLowerCase()));
+          const cHasAnchor = identifiers.find(id => cTokens.includes(id.toLowerCase()));
+          if (hHasAnchor && cHasAnchor) {
+            anchorScore = 1.0;
+            matchedAnchor = hHasAnchor;
+          } else if (hHasAnchor || cHasAnchor) {
+            anchorScore = 0.75;
+            matchedAnchor = hHasAnchor || cHasAnchor;
+          }
         }
+
+        const categoryAligned = (hCategory && cCategory && hCategory === cCategory);
+
+        // Multi-probability weighted confidence
+        let confidence = Math.round(
+          ((lineScore * 0.35) + (semanticScore * 0.40) + (anchorScore * 0.25)) * 100
+        );
+
+        // Specific Probability Boosts (handles 1-line vs verbose description and off-by-N)
+        if (categoryAligned && lineScore >= 0.65) {
+          confidence = Math.max(confidence, 88); // High confidence: shared concept and adjacent block
+        }
+        if (categoryAligned && lineScore >= 0.85) {
+          confidence = Math.max(confidence, 96); // Exceptional: same line + same concept
+        }
+        if (lineScore === 1.0 && (semanticScore >= 0.35 || matchedAnchor)) {
+          confidence = Math.max(confidence, 92);
+        }
+
+        let justification = '';
+        if (categoryAligned) {
+          const catName = BUG_CATEGORIES[hCategory]?.name || 'Concept Defect';
+          justification = `Both identify ${catName} near Line ${hLines.join(',') || cLines.join(',')} (${Math.round(semanticScore * 100)}% semantic alignment). Verified across 1-liner vs detailed description.`;
+        } else if (lineScore >= 0.85 && semanticScore >= 0.4) {
+          justification = `Direct alignment on Line ${hLines.join(',') || cLines.join(',')} (${Math.round(semanticScore * 100)}% keyword overlap).`;
+        } else if (lineScore >= 0.80) {
+          justification = `Same execution block (within 2 lines). Targeted variables and behavior correlate.`;
+        } else if (semanticScore >= 0.6) {
+          justification = `Strong conceptual match (${Math.round(semanticScore * 100)}% semantic overlap), despite line drift.`;
+        } else {
+          justification = `Weak correlation between descriptions and line targets.`;
+        }
+
+        candidates.push({
+          hIdx,
+          cIdx,
+          hBug,
+          cBug,
+          confidence,
+          category: hCategory || cCategory || null,
+          categoryName: BUG_CATEGORIES[hCategory || cCategory]?.name || null,
+          categoryIcon: BUG_CATEGORIES[hCategory || cCategory]?.icon || '🐛',
+          lineScore: Math.round(lineScore * 100),
+          semanticScore: Math.round(semanticScore * 100),
+          matchedAnchor,
+          justification,
+        });
       });
     });
 
-    if (perfectMatches > 0) {
+    candidates.sort((a, b) => b.confidence - a.confidence);
+
+    const matchedH = new Set();
+    const matchedC = new Set();
+    const pairs = [];
+
+    for (const cand of candidates) {
+      if (!matchedH.has(cand.hIdx) && !matchedC.has(cand.cIdx)) {
+        const overrideKey = `${hunterReport.id}_h${cand.hBug.id || cand.hIdx}`;
+        const userOverride = overrides[overrideKey];
+
+        const isConfident = cand.confidence >= 45;
+        if (isConfident || userOverride === 'confirmed') {
+          matchedH.add(cand.hIdx);
+          matchedC.add(cand.cIdx);
+
+          const status = userOverride || (cand.confidence >= 65 ? 'CONFIRMED' : 'PROBABLE');
+          pairs.push({
+            ...cand,
+            status,
+            userOverridden: !!userOverride,
+          });
+        }
+      }
+    }
+
+    const unmatchedHunterBugs = hunterBugs
+      .map((hBug, hIdx) => ({ hBug, hIdx }))
+      .filter(({ hIdx }) => !matchedH.has(hIdx))
+      .map(({ hBug, hIdx }) => {
+        const overrideKey = `${hunterReport.id}_h${hBug.id || hIdx}`;
+        return {
+          hBug,
+          hIdx,
+          status: overrides[overrideKey] || 'UNMATCHED_FALSE',
+          userOverridden: !!overrides[overrideKey],
+        };
+      });
+
+    const missedCreatorBugs = creatorBugs
+      .map((cBug, cIdx) => ({ cBug, cIdx }))
+      .filter(({ cIdx }) => !matchedC.has(cIdx));
+
+    let verifiedCount = 0;
+    let hunterBonusCount = 0;
+    let falsePositiveCount = 0;
+    let acceptedBonusCount = 0;
+
+    pairs.forEach(p => {
+      if (p.status === 'CONFIRMED' || p.status === 'PROBABLE') {
+        verifiedCount++;
+        if (p.hBug.fix && p.hBug.fix.trim().length > 5) hunterBonusCount++;
+      } else if (p.status === 'rejected') {
+        falsePositiveCount++;
+      }
+    });
+
+    unmatchedHunterBugs.forEach(u => {
+      if (u.status === 'bonus') {
+        acceptedBonusCount++;
+      } else if (u.status !== 'rejected') {
+        falsePositiveCount++;
+      }
+    });
+
+    // Precision & Anti-Spam Calculation (prevents spamming reports to steal wins)
+    const totalReported = hunterBugs.length;
+    const precisionRate = totalReported > 0
+      ? Math.round(((verifiedCount + acceptedBonusCount) / totalReported) * 100)
+      : 0;
+    const isHighSpam = (totalReported >= (creatorBugs.length + 2) && precisionRate < 50) || falsePositiveCount >= 3;
+
+    // Fair Scoring Model
+    // Verified planted bugs: +100 pts
+    // Bonus genuine unintended bugs: +75 pts
+    // Accurate fixes provided: +25 pts
+    // False/unverified claims: -40 pts penalty
+    const hunterScore = Math.max(0, (verifiedCount * 100) + (acceptedBonusCount * 75) + (hunterBonusCount * 25) - (falsePositiveCount * 40));
+    // Creator Defense: +80 pts per missed stealth bug + 50 pts bonus if hunter spammed
+    const creatorScore = (missedCreatorBugs.length * 80) + (isHighSpam ? 50 : 0);
+
+    let recommendedWinner = 'None';
+    let recommendationReason = '';
+
+    if (isHighSpam && creatorScore >= hunterScore) {
+      recommendedWinner = hunterReport.originalTeam;
+      recommendationReason = `Creating Team defended against ${falsePositiveCount} false claims (Finding Team spam-penalized: ${precisionRate}% accuracy). Creator's stealth defense prevailed!`;
+    } else if (verifiedCount > 0 && verifiedCount >= creatorBugs.length && falsePositiveCount === 0) {
+      recommendedWinner = hunterReport.reviewer;
+      recommendationReason = `Finding Team cleanly caught all ${verifiedCount}/${creatorBugs.length} planted bugs with 100% precision & 0 false claims!`;
+    } else if (missedCreatorBugs.length > verifiedCount) {
+      recommendedWinner = hunterReport.originalTeam;
+      recommendationReason = `Creating Team's stealth bugs prevailed (${missedCreatorBugs.length} missed bugs vs ${verifiedCount} caught).`;
+    } else if (hunterScore > creatorScore && precisionRate >= 50) {
+      recommendedWinner = hunterReport.reviewer;
+      recommendationReason = `Finding Team leads on verified accuracy points (${hunterScore} pts vs ${creatorScore} defense pts, ${precisionRate}% precision).`;
+    } else if (creatorScore > hunterScore) {
+      recommendedWinner = hunterReport.originalTeam;
+      recommendationReason = `Creating Team leads on stealth defense points (${creatorScore} pts vs ${hunterScore} pts).`;
+    } else {
+      recommendedWinner = 'TIE';
+      recommendationReason = `Close contest (${hunterScore} pts each). Admin discretion or code quality tie-breaker advised.`;
+    }
+
+    return {
+      pairs,
+      unmatchedHunterBugs,
+      missedCreatorBugs,
+      verifiedCount,
+      hunterBonusCount,
+      acceptedBonusCount,
+      falsePositiveCount,
+      precisionRate,
+      isHighSpam,
+      hunterScore,
+      creatorScore,
+      recommendedWinner,
+      recommendationReason,
+      status: verifiedCount > 0 ? (verifiedCount === creatorBugs.length ? 'PERFECT' : 'PARTIAL') : 'MISMATCH',
+    };
+  };
+
+  const evaluateBugMatch = (hunterReport, creatorTeamData) => {
+    const analysis = computeDeepBugAnalysis(hunterReport, creatorTeamData);
+    if (analysis.status === 'PERFECT') {
       return {
         status: 'PERFECT',
-        score: perfectMatches * 100 + partialMatches * 50,
+        score: analysis.hunterScore,
         label: '🟢 PERFECT MATCH',
-        details: `${perfectMatches} bug(s) matched exact line number & description keywords!`
+        details: `${analysis.verifiedCount} bug(s) verified! 0 false claims.`
       };
-    } else if (partialMatches > 0) {
+    } else if (analysis.status === 'PARTIAL') {
       return {
         status: 'PARTIAL',
-        score: partialMatches * 50,
+        score: analysis.hunterScore,
         label: '🟡 PARTIAL MATCH',
-        details: `${partialMatches} bug(s) matched line number or keyword description.`
+        details: `${analysis.verifiedCount} verified bug(s) | ${analysis.falsePositiveCount} false claim(s).`
       };
     } else {
       return {
@@ -1552,6 +2067,193 @@ const BugArena = ({ onAbort }) => {
         details: 'Reported bugs do not match creator\'s registered bugs.'
       };
     }
+  };
+
+  // ── Admin Decision & Bug Override Handlers ──
+  const handleSaveAdminDecision = async (reportId, winner, details = {}) => {
+    try {
+      const getRes = await fetch(REGISTRY_URL);
+      const registry = (await getRes.json()) || {};
+      const verifications = registry.verifications || {};
+      verifications[reportId] = {
+        winner,
+        reason: details.reason || '',
+        hunterScore: details.hunterScore || 0,
+        creatorScore: details.creatorScore || 0,
+        verifiedCount: details.verifiedCount || 0,
+        overrides: bugOverrides[reportId] || {},
+        decidedAt: Date.now(),
+      };
+      registry.verifications = verifications;
+
+      await fetch(REGISTRY_URL, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(registry),
+      });
+
+      setAdminRegistryData(registry);
+      showToast(`🏆 Decision Saved: Winner is "${winner}"!`, 'success');
+    } catch (e) {
+      showToast('Could not save verdict — network error', 'error');
+    }
+  };
+
+  const handleToggleBugOverride = (reportId, bugKey, newStatus) => {
+    setBugOverrides(prev => {
+      const reportOverrides = { ...(prev[reportId] || {}) };
+      if (reportOverrides[bugKey] === newStatus) {
+        delete reportOverrides[bugKey]; // toggle off
+      } else {
+        reportOverrides[bugKey] = newStatus;
+      }
+      return { ...prev, [reportId]: reportOverrides };
+    });
+  };
+
+  // ── Workload Reduction: Batch Auto-Verify Engine ──
+  const handleBatchAutoVerify = async (targetLang = 'all') => {
+    try {
+      const getRes = await fetch(REGISTRY_URL);
+      const registry = (await getRes.json()) || {};
+      const verifications = { ...(registry.verifications || {}) };
+      const newOverrides = { ...bugOverrides };
+
+      const targetReports = reportsList.filter(r => {
+        if (targetLang === 'all') return true;
+        const lang = (r.language || '').toLowerCase() || 'python';
+        return lang === targetLang.toLowerCase();
+      });
+
+      if (targetReports.length === 0) {
+        showToast('No matches found for auto-verification', 'info');
+        return;
+      }
+
+      let count = 0;
+      targetReports.forEach(r => {
+        const creatorData = teamEntries.find(t => t.team === r.originalTeam || t.key === r.key);
+        const analysis = computeDeepBugAnalysis(r, creatorData, newOverrides[r.id] || {});
+
+        const reportOverrides = { ...(newOverrides[r.id] || {}) };
+        analysis.pairs.forEach(p => {
+          const overrideKey = `${r.id}_h${p.hBug.id || p.hIdx}`;
+          if (!reportOverrides[overrideKey] && p.confidence >= 60) {
+            reportOverrides[overrideKey] = 'confirmed';
+          }
+        });
+        newOverrides[r.id] = reportOverrides;
+
+        if (!verifications[r.id] && analysis.recommendedWinner && analysis.recommendedWinner !== 'None') {
+          verifications[r.id] = {
+            winner: analysis.recommendedWinner,
+            reason: analysis.recommendationReason,
+            hunterScore: analysis.hunterScore,
+            creatorScore: analysis.creatorScore,
+            verifiedCount: analysis.verifiedCount,
+            overrides: reportOverrides,
+            decidedAt: Date.now(),
+          };
+          count++;
+        }
+      });
+
+      registry.verifications = verifications;
+      await fetch(REGISTRY_URL, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(registry),
+      });
+
+      setBugOverrides(newOverrides);
+      setAdminRegistryData(registry);
+      showToast(`⚡ Batch verified & decided ${count} matches based on Multi-Probability Evidence!`, 'success');
+    } catch (e) {
+      showToast('Batch auto-verification failed: ' + e.message, 'error');
+    }
+  };
+
+  const handleBatchApplyAiVerdicts = async (targetLang = 'all') => {
+    try {
+      const getRes = await fetch(REGISTRY_URL);
+      const registry = (await getRes.json()) || {};
+      const verifications = { ...(registry.verifications || {}) };
+
+      const targetReports = reportsList.filter(r => {
+        if (targetLang === 'all') return true;
+        const lang = (r.language || '').toLowerCase() || 'python';
+        return lang === targetLang.toLowerCase();
+      });
+
+      let updatedCount = 0;
+      targetReports.forEach(r => {
+        if (!verifications[r.id]) {
+          const creatorData = teamEntries.find(t => t.team === r.originalTeam || t.key === r.key);
+          const analysis = computeDeepBugAnalysis(r, creatorData, bugOverrides[r.id] || {});
+          if (analysis.recommendedWinner && analysis.recommendedWinner !== 'None') {
+            verifications[r.id] = {
+              winner: analysis.recommendedWinner,
+              reason: analysis.recommendationReason,
+              hunterScore: analysis.hunterScore,
+              creatorScore: analysis.creatorScore,
+              verifiedCount: analysis.verifiedCount,
+              overrides: bugOverrides[r.id] || {},
+              decidedAt: Date.now(),
+            };
+            updatedCount++;
+          }
+        }
+      });
+
+      registry.verifications = verifications;
+      await fetch(REGISTRY_URL, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(registry),
+      });
+
+      setAdminRegistryData(registry);
+      showToast(`🎯 Auto-applied AI recommended winners for ${updatedCount} matches!`, 'success');
+    } catch (e) {
+      showToast('Could not apply AI decisions: ' + e.message, 'error');
+    }
+  };
+
+  const handleCopyWinnerSummary = (targetLang = 'all') => {
+    const targetReports = reportsList.filter(r => {
+      if (targetLang === 'all') return true;
+      const lang = (r.language || '').toLowerCase() || 'python';
+      return lang === targetLang.toLowerCase();
+    });
+
+    if (targetReports.length === 0) {
+      showToast('No match records to export.', 'info');
+      return;
+    }
+
+    let summaryText = `═══════════════════════════════════════════════════════════\n`;
+    summaryText += `  🏆 BUG ARENA TOURNAMENT — VERIFICATION RESULTS REPORT\n`;
+    summaryText += `  TRACK: ${targetLang.toUpperCase()} | Generated: ${new Date().toLocaleString()}\n`;
+    summaryText += `═══════════════════════════════════════════════════════════\n\n`;
+
+    targetReports.forEach((r, idx) => {
+      const creatorData = teamEntries.find(t => t.team === r.originalTeam || t.key === r.key);
+      const analysis = computeDeepBugAnalysis(r, creatorData, bugOverrides[r.id] || {});
+      const verdict = adminRegistryData?.verifications?.[r.id];
+      const langName = LANGUAGES.find(l => l.id === (r.language || creatorData?.language))?.name || (r.language || 'Code').toUpperCase();
+
+      summaryText += `MATCH #${idx + 1} [${langName}] Key: ${r.key}\n`;
+      summaryText += `  Finding Team:  ${r.reviewer} (Net Score: ${analysis.hunterScore} pts, Accuracy: ${analysis.precisionRate}%)\n`;
+      summaryText += `  Creating Team: ${r.originalTeam} (Defense Score: ${analysis.creatorScore} pts)\n`;
+      summaryText += `  Verified Bugs: ${analysis.verifiedCount} caught | ${analysis.falsePositiveCount} false claims | ${analysis.missedCreatorBugs.length} stealth bugs held\n`;
+      summaryText += `  WINNER:        ${verdict?.winner || analysis.recommendedWinner} ${verdict ? '👑 [Decided]' : '🤖 [AI Recommended]'}\n`;
+      summaryText += `  Verdict Note:  ${verdict?.reason || analysis.recommendationReason}\n`;
+      summaryText += `───────────────────────────────────────────────────────────\n`;
+    });
+
+    navigator.clipboard.writeText(summaryText)
+      .then(() => showToast('📋 Tournament Verification Summary copied to clipboard!'))
+      .catch(() => showToast('Could not copy automatically — check console', 'error'));
   };
 
   // ─── Render Registration / Payment Form ─────────────────────────────────
@@ -2087,14 +2789,38 @@ const BugArena = ({ onAbort }) => {
               This prevents cheating, tab-switching, and unauthorized assistance during the event.
             </p>
           </div>
-          <button
-            className="ba-neon-btn ba-btn-yellow"
-            style={{ fontSize: '1rem', padding: '0.85rem 2rem', marginTop: '0.4rem', display: 'flex', alignItems: 'center', gap: '0.6rem' }}
-            onClick={() => document.documentElement.requestFullscreen?.().catch(() => {})}
-          >
-            <span style={{ fontSize: '1.2rem' }}>⛶</span>
-            <span>Enter Fullscreen Mode to Unlock</span>
-          </button>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.75rem', marginTop: '0.4rem' }}>
+            <button
+              className="ba-neon-btn ba-btn-yellow"
+              style={{ fontSize: '1rem', padding: '0.85rem 2rem', display: 'flex', alignItems: 'center', gap: '0.6rem' }}
+              onClick={enterFullscreenMode}
+            >
+              <span style={{ fontSize: '1.2rem' }}>⛶</span>
+              <span>Enter Fullscreen Mode to Unlock</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setIsFullscreen(true);
+                showToast('Unlocked in workspace window mode. Please keep the contest tab active!', 'info');
+              }}
+              style={{
+                background: 'transparent',
+                border: '1px solid rgba(251, 191, 36, 0.25)',
+                borderRadius: '8px',
+                color: '#fbbf24',
+                padding: '0.35rem 0.9rem',
+                fontSize: '0.76rem',
+                cursor: 'pointer',
+                opacity: 0.85,
+                transition: 'all 0.2s ease',
+              }}
+              onMouseEnter={e => e.currentTarget.style.opacity = '1'}
+              onMouseLeave={e => e.currentTarget.style.opacity = '0.85'}
+            >
+              ⚠️ Browser not entering fullscreen? Click here to unlock directly
+            </button>
+          </div>
         </div>
       ) : (
         <>
@@ -2872,7 +3598,7 @@ const BugArena = ({ onAbort }) => {
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem 1.5rem', background: `${statusBg(reg.paymentStatus)}`, flexWrap: 'wrap', gap: '0.8rem' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
                         <span style={{ fontSize: '1.1rem', fontWeight: 800, color: '#fff', fontFamily: 'Space Grotesk, sans-serif' }}>
-                          {reg.teamType === 'duo' ? '👥' : '👤'} {reg.members.map(m => m.name).join(' & ')}
+                          {reg.teamType === 'duo' ? '👥' : '👤'} {(reg.members || []).map(m => m?.name || m || 'Member').join(' & ')}
                         </span>
                         <span style={{ fontSize: '0.75rem', padding: '0.25rem 0.7rem', borderRadius: '20px', background: statusBg(reg.paymentStatus), border: `1px solid ${statusColor(reg.paymentStatus)}44`, color: statusColor(reg.paymentStatus), fontWeight: 700, fontFamily: 'Space Grotesk, sans-serif', textTransform: 'uppercase' }}>
                           {reg.paymentStatus}
@@ -2906,15 +3632,15 @@ const BugArena = ({ onAbort }) => {
                           <h4 style={{ color: '#00ffff', margin: '0 0 1rem', fontFamily: 'Space Grotesk, sans-serif', fontSize: '0.88rem' }}>
                             👤 Registered Members
                           </h4>
-                          {reg.members.map((m, i) => (
+                          {(reg.members || []).map((m, i) => (
                             <div key={i} style={{ background: 'rgba(0,255,255,0.04)', border: '1px solid rgba(0,255,255,0.1)', borderRadius: '10px', padding: '0.8rem 1rem', marginBottom: '0.7rem' }}>
                               <div style={{ fontWeight: 800, color: '#e4e4f0', fontFamily: 'Space Grotesk, sans-serif', marginBottom: '0.3rem' }}>
-                                Member {i + 1}: {m.name}
+                                Member {i + 1}: {typeof m === 'string' ? m : (m?.name || 'Member')}
                               </div>
                               <div style={{ fontSize: '0.82rem', color: '#9d4edd' }}>
-                                💳 UPI: <code style={{ color: '#00ffff', background: 'rgba(0,255,255,0.06)', padding: '0.1rem 0.4rem', borderRadius: '4px' }}>{m.upiId}</code>
+                                💳 UPI: <code style={{ color: '#00ffff', background: 'rgba(0,255,255,0.06)', padding: '0.1rem 0.4rem', borderRadius: '4px' }}>{m?.upiId || 'N/A'}</code>
                               </div>
-                              {m.email && (
+                              {m?.email && (
                                 <div style={{ fontSize: '0.8rem', color: '#7a7a9e', marginTop: '0.3rem' }}>📧 {m.email}</div>
                               )}
                             </div>
@@ -2974,10 +3700,10 @@ const BugArena = ({ onAbort }) => {
                           {reg.paymentScreenshotUrl ? (
                             <div style={{ position: 'relative' }}>
                               <img
-                                src={`${serverBase}${reg.paymentScreenshotUrl}`}
+                                src={reg.paymentScreenshotUrl.startsWith('http') || reg.paymentScreenshotUrl.startsWith('data:') ? reg.paymentScreenshotUrl : `${serverBase}${reg.paymentScreenshotUrl}`}
                                 alt="Payment screenshot"
                                 style={{ width: '100%', maxHeight: '340px', objectFit: 'contain', borderRadius: '10px', border: '1px solid rgba(251,191,36,0.2)', background: '#000', cursor: 'pointer' }}
-                                onClick={() => window.open(`${serverBase}${reg.paymentScreenshotUrl}`, '_blank')}
+                                onClick={() => window.open(reg.paymentScreenshotUrl.startsWith('http') || reg.paymentScreenshotUrl.startsWith('data:') ? reg.paymentScreenshotUrl : `${serverBase}${reg.paymentScreenshotUrl}`, '_blank')}
                               />
                               <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: '#7a7a9e', textAlign: 'center' }}>
                                 🔍 Click to open full size
@@ -3109,147 +3835,951 @@ const BugArena = ({ onAbort }) => {
           </div>
         )}
 
-        {/* TAB 3: Side-by-Side Comparison & Winner Decision */}
+        {/* TAB 3: Side-by-Side Verification & Winner Decision */}
         {adminActiveTab === 'compare' && (
           <div className="ba-admin-dashboard ba-fade-in">
-            <div className="ba-admin-header">
-              <div className="ba-admin-header-title">⚖️ Side-by-Side Verification & Winner Decision</div>
+            {/* Top Verification Control Bar */}
+            <div className="ba-admin-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+              <div>
+                <div className="ba-admin-header-title" style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                  <span>⚖️ Side-by-Side Verification &amp; Winner Decision</span>
+                  <span style={{ fontSize: '0.85rem', background: 'rgba(0, 255, 255, 0.15)', border: '1px solid rgba(0, 255, 255, 0.4)', color: '#00ffff', borderRadius: '12px', padding: '0.15rem 0.6rem', fontWeight: 800 }}>
+                    {reportsList.length} Total Matches
+                  </span>
+                </div>
+                <div style={{ color: '#8888aa', fontSize: '0.78rem', marginTop: '0.2rem' }}>
+                  Intelligent multi-probability semantic evaluator &amp; anti-spam adjudication engine
+                </div>
+              </div>
+
+              {/* Workload Reduction Tools */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="ba-neon-btn ba-btn-sm"
+                  onClick={() => handleBatchAutoVerify(compareLangFilter)}
+                  style={{ background: 'rgba(74, 222, 128, 0.15)', borderColor: 'rgba(74, 222, 128, 0.6)', color: '#4ade80', fontWeight: 800 }}
+                  title="Auto-confirms high-confidence bug alignments (>=60%) and awards fair winner based on verified score"
+                >
+                  ⚡ Auto-Verify {compareLangFilter === 'all' ? 'All Matches' : compareLangFilter.toUpperCase()}
+                </button>
+
+                <button
+                  type="button"
+                  className="ba-neon-btn ba-btn-sm"
+                  onClick={() => handleBatchApplyAiVerdicts(compareLangFilter)}
+                  style={{ background: 'rgba(0, 255, 255, 0.12)', borderColor: 'rgba(0, 255, 255, 0.5)', color: '#00ffff', fontWeight: 800 }}
+                  title="Apply AI recommended winner for all pending matches in one click"
+                >
+                  🎯 Apply AI Decisions
+                </button>
+
+                <button
+                  type="button"
+                  className="ba-neon-btn ba-btn-sm"
+                  onClick={() => handleCopyWinnerSummary(compareLangFilter)}
+                  style={{ background: 'rgba(251, 191, 36, 0.12)', borderColor: 'rgba(251, 191, 36, 0.5)', color: '#fbbf24', fontWeight: 800 }}
+                  title="Copy a full summary report of all verified winners to clipboard"
+                >
+                  📋 Export Results
+                </button>
+
+                <button
+                  type="button"
+                  className="ba-neon-btn ba-btn-sm"
+                  onClick={() => setShowTrackLeaderboard(prev => !prev)}
+                  style={{ background: showTrackLeaderboard ? 'rgba(157, 78, 221, 0.3)' : 'rgba(157, 78, 221, 0.12)', borderColor: 'rgba(157, 78, 221, 0.6)', color: '#e0aaff', fontWeight: 800 }}
+                >
+                  🏆 {showTrackLeaderboard ? 'Hide Standings' : 'Track Standings'}
+                </button>
+
+                <button
+                  type="button"
+                  className="ba-neon-btn ba-btn-sm"
+                  onClick={fetchAdminRegistryData}
+                  style={{ background: 'rgba(255, 255, 255, 0.05)', borderColor: 'rgba(255, 255, 255, 0.2)', color: '#aaa' }}
+                >
+                  🔄 Refresh
+                </button>
+              </div>
             </div>
 
-            <div style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-              {reportsList.length === 0 ? (
-                <div style={{ padding: '2rem', textAlign: 'center', color: '#7a7a9e' }}>
-                  <p>No hunt reports submitted yet. Once teams decode keys and submit reports, side-by-side comparisons will appear here for winner selection!</p>
-                </div>
-              ) : (
-                 reportsList.map((r, idx) => {
-                  const creatorData = teamEntries.find(t => t.team === r.originalTeam || t.key === r.key);
-                  // BUG FIX: evaluateBugMatch was defined but never called — wire it here
-                  const matchResult = evaluateBugMatch(r, creatorData);
+            <div style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              {/* Language Navigation Track Pills */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.6rem',
+                flexWrap: 'wrap',
+                background: 'rgba(0, 0, 0, 0.45)',
+                border: '1px solid rgba(0, 255, 255, 0.2)',
+                borderRadius: '14px',
+                padding: '0.9rem 1.2rem',
+              }}>
+                <span style={{ fontSize: '0.82rem', color: '#00ffff', fontWeight: 900, fontFamily: 'Space Grotesk, sans-serif', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <span>🌐</span> Language Isolation Tracks:
+                </span>
+                {['all', 'python', 'java', 'cpp', 'c', 'javascript', 'rust', 'go'].map((langKey) => {
+                  const count = langKey === 'all'
+                    ? reportsList.length
+                    : reportsList.filter(r => (r.language || '').toLowerCase() === langKey).length;
+                  const decidedCount = langKey === 'all'
+                    ? reportsList.filter(r => !!adminRegistryData?.verifications?.[r.id]).length
+                    : reportsList.filter(r => (r.language || '').toLowerCase() === langKey && !!adminRegistryData?.verifications?.[r.id]).length;
+                  const langObj = LANGUAGES.find(l => l.id === langKey);
+                  const label = langKey === 'all' ? 'All Tracks' : (langObj ? langObj.name : langKey.toUpperCase());
+                  const isSelected = compareLangFilter === langKey;
 
                   return (
-                    <div key={r.id || idx} style={{ background: 'rgba(10, 10, 25, 0.8)', border: '2px solid rgba(251, 191, 36, 0.3)', borderRadius: '16px', overflow: 'hidden' }}>
-                      {/* Header bar */}
-                      <div style={{ padding: '1rem 1.5rem', background: 'rgba(251, 191, 36, 0.08)', borderBottom: '1px solid rgba(251, 191, 36, 0.2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem' }}>
+                    <button
+                      key={langKey}
+                      type="button"
+                      onClick={() => setCompareLangFilter(langKey)}
+                      style={{
+                        padding: '0.45rem 0.9rem',
+                        borderRadius: '20px',
+                        border: isSelected ? '2px solid #00ffff' : '1px solid rgba(255, 255, 255, 0.12)',
+                        background: isSelected ? 'rgba(0, 255, 255, 0.22)' : 'rgba(255, 255, 255, 0.04)',
+                        color: isSelected ? '#00ffff' : '#8888aa',
+                        fontWeight: isSelected ? 900 : 600,
+                        fontSize: '0.8rem',
+                        cursor: 'pointer',
+                        transition: 'all 0.15s ease',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.45rem',
+                      }}
+                    >
+                      <span>{label}</span>
+                      <span style={{
+                        background: isSelected ? '#00ffff' : 'rgba(255, 255, 255, 0.1)',
+                        color: isSelected ? '#000' : '#aaa',
+                        borderRadius: '10px',
+                        padding: '0.1rem 0.45rem',
+                        fontSize: '0.68rem',
+                        fontWeight: 900,
+                      }}>
+                        {count} {decidedCount > 0 ? `(${decidedCount}✓)` : ''}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Secondary Toolbar: Status Filters & Search */}
+              <div style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                gap: '1rem',
+                background: 'rgba(0, 0, 0, 0.25)',
+                border: '1px solid rgba(255, 255, 255, 0.06)',
+                borderRadius: '12px',
+                padding: '0.7rem 1rem',
+              }}>
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{ fontSize: '0.78rem', color: '#7a7a9e', fontWeight: 800 }}>Status:</span>
+                  {[
+                    { id: 'all', label: 'All Matches' },
+                    { id: 'pending', label: '⏳ Pending Review' },
+                    { id: 'decided', label: '✅ Decided' },
+                    { id: 'spam', label: '🚨 Spam Flagged' },
+                  ].map(tab => {
+                    const isTab = compareStatusFilter === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setCompareStatusFilter(tab.id)}
+                        style={{
+                          padding: '0.3rem 0.75rem',
+                          borderRadius: '8px',
+                          border: isTab ? '1px solid #fbbf24' : '1px solid rgba(255, 255, 255, 0.08)',
+                          background: isTab ? 'rgba(251, 191, 36, 0.2)' : 'transparent',
+                          color: isTab ? '#fbbf24' : '#8888aa',
+                          fontSize: '0.76rem',
+                          fontWeight: isTab ? 800 : 500,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {tab.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <input
+                    type="text"
+                    value={compareSearchQuery}
+                    onChange={(e) => setCompareSearchQuery(e.target.value)}
+                    placeholder="Search by team or key..."
+                    style={{
+                      background: 'rgba(0, 0, 0, 0.5)',
+                      border: '1px solid rgba(0, 255, 255, 0.25)',
+                      borderRadius: '8px',
+                      padding: '0.35rem 0.8rem',
+                      color: '#e4e4f0',
+                      fontSize: '0.78rem',
+                      outline: 'none',
+                      minWidth: '200px',
+                    }}
+                  />
+                  {compareSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setCompareSearchQuery('')}
+                      style={{ background: 'transparent', border: 'none', color: '#888', cursor: 'pointer', fontSize: '0.8rem' }}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Tournament Standings / Track Leaderboard View */}
+              {showTrackLeaderboard && (() => {
+                const targetReports = reportsList.filter(r => {
+                  if (compareLangFilter === 'all') return true;
+                  const lang = (r.language || '').toLowerCase() || 'python';
+                  return lang === compareLangFilter.toLowerCase();
+                });
+
+                // Calculate cumulative verified performance
+                const teamStats = {};
+                targetReports.forEach(r => {
+                  const creatorData = teamEntries.find(t => t.team === r.originalTeam || t.key === r.key);
+                  const analysis = computeDeepBugAnalysis(r, creatorData, bugOverrides[r.id] || {});
+                  const verdict = adminRegistryData?.verifications?.[r.id];
+
+                  // Hunter stats
+                  if (!teamStats[r.reviewer]) {
+                    teamStats[r.reviewer] = { team: r.reviewer, points: 0, wins: 0, matches: 0, verifiedBugs: 0, precision: [] };
+                  }
+                  teamStats[r.reviewer].matches += 1;
+                  teamStats[r.reviewer].points += analysis.hunterScore;
+                  teamStats[r.reviewer].verifiedBugs += analysis.verifiedCount;
+                  teamStats[r.reviewer].precision.push(analysis.precisionRate);
+                  if (verdict?.winner === r.reviewer || (!verdict && analysis.recommendedWinner === r.reviewer)) {
+                    teamStats[r.reviewer].wins += 1;
+                  }
+
+                  // Creator stats
+                  if (!teamStats[r.originalTeam]) {
+                    teamStats[r.originalTeam] = { team: r.originalTeam, points: 0, wins: 0, matches: 0, verifiedBugs: 0, precision: [] };
+                  }
+                  teamStats[r.originalTeam].matches += 1;
+                  teamStats[r.originalTeam].points += analysis.creatorScore;
+                  if (verdict?.winner === r.originalTeam || (!verdict && analysis.recommendedWinner === r.originalTeam)) {
+                    teamStats[r.originalTeam].wins += 1;
+                  }
+                });
+
+                const sortedTeams = Object.values(teamStats).sort((a, b) => b.points - a.points || b.wins - a.wins);
+
+                return (
+                  <div style={{
+                    background: 'rgba(15, 18, 38, 0.95)',
+                    border: '2px solid rgba(157, 78, 221, 0.4)',
+                    borderRadius: '16px',
+                    padding: '1.5rem',
+                    boxShadow: '0 8px 32px rgba(0, 0, 0, 0.5)',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.6rem' }}>
+                      <h3 style={{ margin: 0, color: '#e0aaff', fontSize: '1.15rem', fontFamily: 'Space Grotesk, sans-serif', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span>🏆</span>
+                        <span>{compareLangFilter === 'all' ? 'All Tracks' : compareLangFilter.toUpperCase()} Tournament Standings</span>
+                      </h3>
+                      <span style={{ fontSize: '0.78rem', color: '#a0a0c5' }}>
+                        Ranked by Fair Verified Points &amp; Anti-Spam Accuracy
+                      </span>
+                    </div>
+
+                    {sortedTeams.length === 0 ? (
+                      <p style={{ color: '#8888aa', fontSize: '0.85rem', margin: 0 }}>No match records available yet for this track.</p>
+                    ) : (
+                      <div style={{ overflowX: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem' }}>
+                          <thead>
+                            <tr style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.1)', color: '#8888aa', textAlign: 'left' }}>
+                              <th style={{ padding: '0.6rem 0.8rem' }}>Rank</th>
+                              <th style={{ padding: '0.6rem 0.8rem' }}>Team Name</th>
+                              <th style={{ padding: '0.6rem 0.8rem' }}>Matches</th>
+                              <th style={{ padding: '0.6rem 0.8rem' }}>Wins</th>
+                              <th style={{ padding: '0.6rem 0.8rem' }}>Verified Bugs</th>
+                              <th style={{ padding: '0.6rem 0.8rem' }}>Avg Accuracy</th>
+                              <th style={{ padding: '0.6rem 0.8rem' }}>Total Points</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {sortedTeams.map((t, idx) => {
+                              const avgPrec = t.precision.length > 0 ? Math.round(t.precision.reduce((a, b) => a + b, 0) / t.precision.length) : 0;
+                              return (
+                                <tr key={t.team} style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.05)', background: idx === 0 ? 'rgba(251, 191, 36, 0.06)' : 'transparent' }}>
+                                  <td style={{ padding: '0.7rem 0.8rem', fontWeight: 900 }}>
+                                    {idx === 0 ? '🥇 1st' : idx === 1 ? '🥈 2nd' : idx === 2 ? '🥉 3rd' : `#${idx + 1}`}
+                                  </td>
+                                  <td style={{ padding: '0.7rem 0.8rem', color: '#00ffff', fontWeight: 800 }}>{t.team}</td>
+                                  <td style={{ padding: '0.7rem 0.8rem', color: '#aaa' }}>{t.matches}</td>
+                                  <td style={{ padding: '0.7rem 0.8rem', color: '#4ade80', fontWeight: 800 }}>{t.wins}</td>
+                                  <td style={{ padding: '0.7rem 0.8rem', color: '#fbbf24' }}>{t.verifiedBugs}</td>
+                                  <td style={{ padding: '0.7rem 0.8rem', color: avgPrec >= 65 ? '#4ade80' : '#ff7777' }}>{avgPrec}%</td>
+                                  <td style={{ padding: '0.7rem 0.8rem', color: '#fff', fontWeight: 900, fontSize: '0.95rem' }}>{t.points} pts</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Match Entries */}
+              {(() => {
+                const filteredReports = reportsList.filter(r => {
+                  // 1. Language track filter
+                  if (compareLangFilter !== 'all') {
+                    const lang = (r.language || '').toLowerCase() || 'python';
+                    if (lang !== compareLangFilter.toLowerCase()) return false;
+                  }
+
+                  // 2. Search query filter
+                  if (compareSearchQuery.trim()) {
+                    const q = compareSearchQuery.toLowerCase().trim();
+                    const rev = (r.reviewer || '').toLowerCase();
+                    const orig = (r.originalTeam || '').toLowerCase();
+                    const key = (r.key || '').toLowerCase();
+                    if (!rev.includes(q) && !orig.includes(q) && !key.includes(q)) return false;
+                  }
+
+                  // 3. Status filter
+                  const savedVerdict = adminRegistryData?.verifications?.[r.id];
+                  const creatorData = teamEntries.find(t => t.team === r.originalTeam || t.key === r.key);
+                  const analysis = computeDeepBugAnalysis(r, creatorData, bugOverrides[r.id] || {});
+
+                  if (compareStatusFilter === 'pending' && !!savedVerdict) return false;
+                  if (compareStatusFilter === 'decided' && !savedVerdict) return false;
+                  if (compareStatusFilter === 'spam' && !analysis.isHighSpam) return false;
+
+                  return true;
+                });
+
+                if (filteredReports.length === 0) {
+                  return (
+                    <div style={{ padding: '3.5rem', textAlign: 'center', color: '#7a7a9e', background: 'rgba(0,0,0,0.3)', borderRadius: '16px' }}>
+                      <div style={{ fontSize: '2.5rem', marginBottom: '0.8rem' }}>🔍</div>
+                      <p style={{ margin: 0, fontSize: '1rem', color: '#e4e4f0' }}>
+                        No comparison reports found matching your current filter criteria.
+                      </p>
+                      <p style={{ margin: '0.5rem 0 0', fontSize: '0.82rem', color: '#7777aa' }}>
+                        Track: <strong>{compareLangFilter.toUpperCase()}</strong> | Status: <strong>{compareStatusFilter.toUpperCase()}</strong>
+                      </p>
+                    </div>
+                  );
+                }
+
+                return filteredReports.map((r, idx) => {
+                  const creatorData = teamEntries.find(t => t.team === r.originalTeam || t.key === r.key);
+                  const analysis = computeDeepBugAnalysis(r, creatorData, bugOverrides[r.id] || {});
+                  const savedVerdict = adminRegistryData?.verifications?.[r.id];
+                  const langName = LANGUAGES.find(l => l.id === (r.language || creatorData?.language))?.name || (r.language || 'Code').toUpperCase();
+                  const isDossierOpen = !!expandedAiDossier[r.id];
+                  const isCodeOpen = !!activeCodeInspector[r.id];
+                  const currentHighlightedLine = highlightedCodeLine[r.id] || null;
+
+                  // Validate language isolation
+                  const hunterLang = (r.language || '').toLowerCase();
+                  const creatorLang = (creatorData?.language || '').toLowerCase();
+                  const isLanguageMatched = (!hunterLang || !creatorLang) || (hunterLang === creatorLang);
+
+                  return (
+                    <div
+                      key={r.id || idx}
+                      style={{
+                        background: 'rgba(10, 12, 26, 0.88)',
+                        border: savedVerdict ? '2px solid rgba(74, 222, 128, 0.5)' : analysis.isHighSpam ? '2px solid rgba(255, 95, 86, 0.5)' : '2px solid rgba(251, 191, 36, 0.35)',
+                        borderRadius: '16px',
+                        overflow: 'hidden',
+                        boxShadow: '0 8px 32px rgba(0, 0, 0, 0.45)',
+                      }}
+                    >
+                      {/* Match Header Bar */}
+                      <div style={{
+                        padding: '1.2rem 1.6rem',
+                        background: savedVerdict
+                          ? 'linear-gradient(90deg, rgba(74,222,128,0.12) 0%, rgba(10,12,26,0.85) 100%)'
+                          : analysis.isHighSpam
+                          ? 'linear-gradient(90deg, rgba(255,95,86,0.15) 0%, rgba(10,12,26,0.85) 100%)'
+                          : 'linear-gradient(90deg, rgba(251,191,36,0.1) 0%, rgba(10,12,26,0.85) 100%)',
+                        borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        flexWrap: 'wrap',
+                        gap: '1rem',
+                      }}>
                         <div>
-                          <span style={{ fontSize: '0.78rem', fontWeight: 800, color: '#fbbf24', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-                            MATCH # {idx + 1}
-                          </span>
-                          <h3 style={{ margin: '0.2rem 0 0.3rem', color: '#fff', fontSize: '1.2rem', fontFamily: 'Space Grotesk, sans-serif' }}>
-                            Finding Team: <span style={{ color: '#4ade80' }}>{r.reviewer}</span> vs Creating Team: <span style={{ color: '#ff6b6b' }}>{r.originalTeam}</span>
-                          </h3>
-                          {/* Auto-match result badge */}
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
-                            <span style={{
-                              fontSize: '0.8rem', fontWeight: 800,
-                              color: matchResult.status === 'PERFECT' ? '#4ade80' : matchResult.status === 'PARTIAL' ? '#fbbf24' : '#ff5f56',
-                              background: matchResult.status === 'PERFECT' ? 'rgba(74,222,128,0.1)' : matchResult.status === 'PARTIAL' ? 'rgba(251,191,36,0.1)' : 'rgba(255,95,86,0.1)',
-                              border: `1px solid ${matchResult.status === 'PERFECT' ? 'rgba(74,222,128,0.4)' : matchResult.status === 'PARTIAL' ? 'rgba(251,191,36,0.4)' : 'rgba(255,95,86,0.4)'}`,
-                              borderRadius: '20px', padding: '0.2rem 0.8rem',
-                            }}>
-                              {matchResult.label}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', marginBottom: '0.35rem' }}>
+                            <span style={{ fontSize: '0.75rem', fontWeight: 900, color: '#fbbf24', textTransform: 'uppercase', letterSpacing: '0.12em', fontFamily: 'Space Grotesk, sans-serif' }}>
+                              MATCH #{idx + 1}
                             </span>
-                            <span style={{ fontSize: '0.75rem', color: '#7a7a9e' }}>Score: <strong style={{ color: '#00ffff' }}>{matchResult.score}</strong> pts</span>
-                            <span style={{ fontSize: '0.72rem', color: '#6b6b8a', fontStyle: 'italic' }}>{matchResult.details}</span>
+
+                            {/* Intra-Language Integrity Badge */}
+                            <span style={{
+                              background: isLanguageMatched ? 'rgba(0, 255, 255, 0.15)' : 'rgba(255, 95, 86, 0.2)',
+                              border: isLanguageMatched ? '1px solid rgba(0, 255, 255, 0.4)' : '1px solid rgba(255, 95, 86, 0.5)',
+                              color: isLanguageMatched ? '#00ffff' : '#ff7777',
+                              borderRadius: '4px',
+                              padding: '0.15rem 0.55rem',
+                              fontSize: '0.72rem',
+                              fontWeight: 800,
+                            }}>
+                              {isLanguageMatched ? `💻 ${langName} ⟷ ${langName} (Intra-Language Match)` : `⚠️ Cross-Language Anomaly (${hunterLang} vs ${creatorLang})`}
+                            </span>
+
+                            <span style={{ color: '#7a7a9e', fontSize: '0.72rem', fontFamily: 'Courier New, monospace' }}>
+                              KEY: {r.key}
+                            </span>
+
+                            {analysis.isHighSpam && (
+                              <span style={{ background: 'rgba(255, 95, 86, 0.2)', border: '1px solid #ff5f56', color: '#ff5f56', padding: '0.15rem 0.6rem', borderRadius: '4px', fontSize: '0.7rem', fontWeight: 900 }}>
+                                🚨 LOW ACCURACY / SPAM PENALIZED ({analysis.precisionRate}% Precision)
+                              </span>
+                            )}
                           </div>
+
+                          <h3 style={{ margin: '0 0 0.4rem', color: '#fff', fontSize: '1.25rem', fontFamily: 'Space Grotesk, sans-serif' }}>
+                            Finding Team: <span style={{ color: '#4ade80', fontWeight: 800 }}>{r.reviewer}</span>
+                            <span style={{ color: '#6b6b8a', margin: '0 0.5rem', fontSize: '0.9rem' }}>vs</span>
+                            Creating Team: <span style={{ color: '#ff6b6b', fontWeight: 800 }}>{r.originalTeam}</span>
+                          </h3>
+
+                          {/* Quick Score Metrics */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', flexWrap: 'wrap' }}>
+                            <span style={{
+                              fontSize: '0.78rem',
+                              fontWeight: 800,
+                              color: analysis.status === 'PERFECT' ? '#4ade80' : analysis.status === 'PARTIAL' ? '#fbbf24' : '#ff5f56',
+                              background: analysis.status === 'PERFECT' ? 'rgba(74,222,128,0.15)' : analysis.status === 'PARTIAL' ? 'rgba(251,191,36,0.15)' : 'rgba(255,95,86,0.15)',
+                              border: `1px solid ${analysis.status === 'PERFECT' ? 'rgba(74,222,128,0.5)' : analysis.status === 'PARTIAL' ? 'rgba(251,191,36,0.5)' : 'rgba(255,95,86,0.5)'}`,
+                              borderRadius: '20px',
+                              padding: '0.2rem 0.8rem',
+                            }}>
+                              {analysis.status === 'PERFECT' ? '🟢 100% CLEAN CATCH' : analysis.status === 'PARTIAL' ? `🟡 ${analysis.verifiedCount} VERIFIED BUGS` : '🔴 0 VERIFIED MATCHES'}
+                            </span>
+
+                            <span style={{ fontSize: '0.78rem', color: '#a0a0c5' }}>
+                              Net Finder Score: <strong style={{ color: '#4ade80' }}>{analysis.hunterScore} pts</strong>
+                              {' '}({analysis.verifiedCount} verified, {analysis.falsePositiveCount} false @ -40/ea)
+                            </span>
+
+                            <span style={{ fontSize: '0.78rem', color: '#a0a0c5' }}>
+                              Creator Defense: <strong style={{ color: '#ff6b6b' }}>{analysis.creatorScore} pts</strong>
+                              {' '}({analysis.missedCreatorBugs.length} stealth bugs defended)
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Winner Decision Actions */}
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.6rem' }}>
+                          {savedVerdict && (
+                            <div style={{
+                              background: 'rgba(74, 222, 128, 0.15)',
+                              border: '1px solid rgba(74, 222, 128, 0.5)',
+                              borderRadius: '8px',
+                              padding: '0.35rem 0.8rem',
+                              color: '#4ade80',
+                              fontSize: '0.78rem',
+                              fontWeight: 800,
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '0.4rem',
+                            }}>
+                              <span>👑</span>
+                              <span>DECIDED WINNER: {savedVerdict.winner}</span>
+                            </div>
+                          )}
+
+                          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                            <button
+                              type="button"
+                              className="ba-neon-btn ba-btn-sm"
+                              onClick={() => handleSaveAdminDecision(r.id, r.reviewer, {
+                                hunterScore: analysis.hunterScore,
+                                creatorScore: analysis.creatorScore,
+                                verifiedCount: analysis.verifiedCount,
+                                reason: analysis.recommendationReason,
+                              })}
+                              style={{
+                                background: savedVerdict?.winner === r.reviewer ? 'rgba(74, 222, 128, 0.3)' : 'rgba(74, 222, 128, 0.12)',
+                                borderColor: 'rgba(74, 222, 128, 0.6)',
+                                color: '#4ade80',
+                                fontWeight: 800,
+                              }}
+                            >
+                              🥇 Award: {r.reviewer} ({analysis.hunterScore} pts)
+                            </button>
+
+                            <button
+                              type="button"
+                              className="ba-neon-btn ba-btn-sm"
+                              onClick={() => handleSaveAdminDecision(r.id, r.originalTeam, {
+                                hunterScore: analysis.hunterScore,
+                                creatorScore: analysis.creatorScore,
+                                verifiedCount: analysis.verifiedCount,
+                                reason: analysis.recommendationReason,
+                              })}
+                              style={{
+                                background: savedVerdict?.winner === r.originalTeam ? 'rgba(255, 107, 107, 0.3)' : 'rgba(255, 107, 107, 0.12)',
+                                borderColor: 'rgba(255, 107, 107, 0.6)',
+                                color: '#ff6b6b',
+                                fontWeight: 800,
+                              }}
+                            >
+                              🥇 Award: {r.originalTeam} ({analysis.creatorScore} pts)
+                            </button>
+
+                            <button
+                              type="button"
+                              className="ba-neon-btn ba-btn-sm"
+                              onClick={() => handleSaveAdminDecision(r.id, 'DRAW / TIE', {
+                                hunterScore: analysis.hunterScore,
+                                creatorScore: analysis.creatorScore,
+                                verifiedCount: analysis.verifiedCount,
+                                reason: 'Admin declared tie',
+                              })}
+                              style={{ background: 'rgba(251, 191, 36, 0.1)', borderColor: 'rgba(251, 191, 36, 0.4)', color: '#fbbf24' }}
+                            >
+                              🤝 Draw
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* AI Judging Recommendation Banner */}
+                      <div style={{
+                        padding: '0.8rem 1.6rem',
+                        background: 'rgba(0, 0, 0, 0.35)',
+                        borderBottom: '1px solid rgba(255, 255, 255, 0.05)',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        flexWrap: 'wrap',
+                        gap: '0.8rem',
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flex: 1 }}>
+                          <span style={{ fontSize: '1.1rem' }}>🤖</span>
+                          <span style={{ fontSize: '0.82rem', color: '#e4e4f0' }}>
+                            <strong>Smart Verdict Recommendation:</strong>{' '}
+                            <span style={{ color: analysis.recommendedWinner === r.reviewer ? '#4ade80' : analysis.recommendedWinner === r.originalTeam ? '#ff6b6b' : '#fbbf24', fontWeight: 800 }}>
+                              {analysis.recommendedWinner}
+                            </span>
+                            {' — '}{analysis.recommendationReason}
+                          </span>
                         </div>
 
                         <div style={{ display: 'flex', gap: '0.6rem' }}>
                           <button
-                            className="ba-neon-btn ba-btn-sm"
-                            onClick={() => showToast(`🏆 Winner Declared: Team "${r.reviewer}"!`)}
-                            style={{ background: 'rgba(74, 222, 128, 0.15)', borderColor: 'rgba(74, 222, 128, 0.5)', color: '#4ade80' }}
+                            type="button"
+                            onClick={() => setActiveCodeInspector(prev => ({ ...prev, [r.id]: !prev[r.id] }))}
+                            style={{
+                              background: isCodeOpen ? 'rgba(0, 255, 255, 0.2)' : 'transparent',
+                              border: '1px solid rgba(0, 255, 255, 0.4)',
+                              borderRadius: '6px',
+                              color: '#00ffff',
+                              padding: '0.25rem 0.7rem',
+                              fontSize: '0.74rem',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '0.35rem',
+                            }}
                           >
-                            🥇 Award Winner: {r.reviewer}
+                            <span>👁️ {isCodeOpen ? 'Hide Code Split-View' : 'Source Code Split-View'}</span>
                           </button>
+
                           <button
-                            className="ba-neon-btn ba-btn-sm"
-                            onClick={() => showToast(`🏆 Winner Declared: Team "${r.originalTeam}"!`)}
-                            style={{ background: 'rgba(255, 107, 107, 0.15)', borderColor: 'rgba(255, 107, 107, 0.5)', color: '#ff6b6b' }}
+                            type="button"
+                            onClick={() => setExpandedAiDossier(prev => ({ ...prev, [r.id]: !prev[r.id] }))}
+                            style={{
+                              background: 'transparent',
+                              border: '1px solid rgba(251, 191, 36, 0.3)',
+                              borderRadius: '6px',
+                              color: '#fbbf24',
+                              padding: '0.25rem 0.7rem',
+                              fontSize: '0.74rem',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '0.35rem',
+                            }}
                           >
-                            🥇 Award Winner: {r.originalTeam}
+                            <span>{isDossierOpen ? '▲ Hide Analysis Dossier' : '▼ View AI Semantic Breakdown'}</span>
                           </button>
                         </div>
                       </div>
 
-                      {/* 2 Column Side-by-Side Comparison */}
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem', padding: '1.5rem' }}>
-                        {/* Column 1: Creating Team */}
-                        <div style={{ background: 'rgba(255, 107, 107, 0.04)', border: '1px solid rgba(255, 107, 107, 0.2)', borderRadius: '12px', padding: '1.2rem' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
-                            <span style={{ fontSize: '0.78rem', fontWeight: 800, color: '#ff6b6b', textTransform: 'uppercase' }}>
-                              🔧 CREATING TEAM
-                            </span>
-                            <span style={{ fontWeight: 800, color: '#ff6b6b', fontSize: '1rem' }}>
-                              {r.originalTeam}
-                            </span>
-                          </div>
-
-                          <h5 style={{ color: '#a0a0c5', margin: '0 0 0.5rem', fontSize: '0.8rem' }}>Planted Bugs Registered:</h5>
-                          {(creatorData?.createdBugs || []).length === 0 ? (
-                            <p style={{ color: '#7a7a9e', fontSize: '0.85rem' }}>No bug details recorded.</p>
-                          ) : (
-                            (creatorData.createdBugs).map((cb, i) => (
-                              <div key={i} style={{ background: 'rgba(0, 0, 0, 0.4)', padding: '0.6rem 0.8rem', borderRadius: '8px', marginBottom: '0.5rem', borderLeft: '3px solid #ff6b6b' }}>
-                                <span style={{ color: '#ff6b6b', fontWeight: 800, fontSize: '0.78rem' }}>
-                                  Line #{cb.lineNumber || 'N/A'}:
+                      {/* Interactive Code Spotlight Split View */}
+                      {isCodeOpen && (
+                        <div style={{
+                          padding: '1.2rem 1.6rem',
+                          background: 'rgba(0, 0, 0, 0.6)',
+                          borderBottom: '1px solid rgba(0, 255, 255, 0.2)',
+                        }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.6rem' }}>
+                            <div style={{ color: '#00ffff', fontSize: '0.82rem', fontWeight: 800, fontFamily: 'Space Grotesk, sans-serif' }}>
+                              🔍 Code Spotlight — {r.originalTeam}'s Submitted {langName} Source:
+                              {currentHighlightedLine && (
+                                <span style={{ marginLeft: '0.6rem', background: '#00ffff', color: '#000', padding: '0.1rem 0.5rem', borderRadius: '4px', fontSize: '0.72rem', fontWeight: 900 }}>
+                                  Target Line: #{currentHighlightedLine}
                                 </span>
-                                <p style={{ margin: '0.1rem 0 0', color: '#e4e4f0', fontSize: '0.85rem' }}>
-                                  {cb.description}
-                                </p>
-                              </div>
-                            ))
-                          )}
-
-                          {creatorData?.code && (
-                            <div style={{ marginTop: '1rem' }}>
-                              <h5 style={{ color: '#a0a0c5', margin: '0 0 0.5rem', fontSize: '0.8rem' }}>Submitted Code:</h5>
-                              <CodeEditor
-                                code={creatorData.code}
-                                language={creatorData.language || 'python'}
-                                readOnly
-                              />
+                              )}
                             </div>
-                          )}
-                        </div>
-
-                        {/* Column 2: Finding Team */}
-                        <div style={{ background: 'rgba(74, 222, 128, 0.04)', border: '1px solid rgba(74, 222, 128, 0.2)', borderRadius: '12px', padding: '1.2rem' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
-                            <span style={{ fontSize: '0.78rem', fontWeight: 800, color: '#4ade80', textTransform: 'uppercase' }}>
-                              🐛 FINDING TEAM
-                            </span>
-                            <span style={{ fontWeight: 800, color: '#4ade80', fontSize: '1rem' }}>
-                              {r.reviewer}
+                            <span style={{ color: '#8888aa', fontSize: '0.74rem' }}>
+                              Click "Focus Line" on any bug row below to illuminate the targeted code statement
                             </span>
                           </div>
 
-                          <h5 style={{ color: '#a0a0c5', margin: '0 0 0.5rem', fontSize: '0.8rem' }}>Reported Bugs Found:</h5>
-                          {(r.foundBugs || []).length === 0 ? (
-                            <p style={{ color: '#7a7a9e', fontSize: '0.85rem' }}>No bugs reported.</p>
-                          ) : (
-                            (r.foundBugs).map((fb, i) => (
-                              <div key={i} style={{ background: 'rgba(0, 0, 0, 0.4)', padding: '0.6rem 0.8rem', borderRadius: '8px', marginBottom: '0.5rem', borderLeft: '3px solid #4ade80' }}>
-                                <span style={{ color: '#4ade80', fontWeight: 800, fontSize: '0.78rem' }}>
-                                  Reported Line #{fb.lineNumber || 'N/A'}:
-                                </span>
-                                <p style={{ margin: '0.1rem 0 0.2rem', color: '#e4e4f0', fontSize: '0.85rem' }}>
-                                  {fb.description}
-                                </p>
-                                {fb.fix && (
-                                  <p style={{ margin: 0, color: '#00ffff', fontSize: '0.8rem', fontFamily: 'Courier New, monospace' }}>
-                                    Fix: {fb.fix}
-                                  </p>
-                                )}
-                              </div>
-                            ))
-                          )}
+                          <CodeEditor
+                            code={creatorData?.code || r.originalCode}
+                            language={(creatorData?.language || r.language || 'python')}
+                            readOnly
+                            highlightLine={currentHighlightedLine}
+                          />
                         </div>
+                      )}
+
+                      {/* Expanded AI Semantic Dossier */}
+                      {isDossierOpen && (
+                        <div style={{
+                          padding: '1.2rem 1.6rem',
+                          background: 'rgba(0, 255, 255, 0.03)',
+                          borderBottom: '1px solid rgba(0, 255, 255, 0.15)',
+                          fontSize: '0.8rem',
+                          color: '#b0b0d0',
+                          lineHeight: 1.6,
+                        }}>
+                          <h4 style={{ margin: '0 0 0.6rem', color: '#00ffff', fontSize: '0.88rem', fontFamily: 'Space Grotesk, sans-serif' }}>
+                            🧠 Deep Cross-Examination &amp; Multi-Probability Dossier:
+                          </h4>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                            {analysis.pairs.map((p, pIdx) => (
+                              <div key={pIdx} style={{ background: 'rgba(0,0,0,0.4)', padding: '0.6rem 0.9rem', borderRadius: '8px', borderLeft: '3px solid #00ffff' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.2rem' }}>
+                                  <strong style={{ color: '#00ffff' }}>Pair #{pIdx + 1} (Confidence: {p.confidence}%):</strong>
+                                  {p.categoryName && (
+                                    <span style={{ background: 'rgba(0,255,255,0.15)', color: '#00ffff', padding: '0.05rem 0.45rem', borderRadius: '4px', fontSize: '0.7rem', fontWeight: 800 }}>
+                                      {p.categoryIcon} {p.categoryName}
+                                    </span>
+                                  )}
+                                  {p.matchedAnchor && (
+                                    <span style={{ background: 'rgba(251,191,36,0.15)', color: '#fbbf24', padding: '0.05rem 0.45rem', borderRadius: '4px', fontSize: '0.7rem', fontWeight: 800 }}>
+                                      ⚓ Anchor: '{p.matchedAnchor}'
+                                    </span>
+                                  )}
+                                </div>
+                                <div style={{ color: '#e4e4f0' }}>{p.justification}</div>
+                                <div style={{ color: '#7a7a9e', fontSize: '0.74rem', marginTop: '0.2rem' }}>
+                                  [Proximity: {p.lineScore}% | Semantic Description Overlap: {p.semanticScore}%]
+                                </div>
+                              </div>
+                            ))}
+
+                            {analysis.unmatchedHunterBugs.map((u, uIdx) => (
+                              <div key={`u-${uIdx}`} style={{ background: 'rgba(255,95,86,0.06)', padding: '0.6rem 0.9rem', borderRadius: '8px', borderLeft: '3px solid #ff5f56' }}>
+                                <strong style={{ color: '#ff5f56' }}>Unmatched Hunter Claim #{uIdx + 1} (-40 pts):</strong>{' '}
+                                Hunter reported Line #{u.hBug.lineNumber || 'N/A'} ("{u.hBug.description}"), but Creator planted no bug matching this location or concept. Assessed as an unverified/false claim to prevent spam wins.
+                              </div>
+                            ))}
+
+                            {analysis.missedCreatorBugs.map((m, mIdx) => (
+                              <div key={`m-${mIdx}`} style={{ background: 'rgba(157,78,221,0.08)', padding: '0.6rem 0.9rem', borderRadius: '8px', borderLeft: '3px solid #9d4edd' }}>
+                                <strong style={{ color: '#c77dff' }}>Missed Planted Bug #{mIdx + 1} (+80 pts Defense):</strong>{' '}
+                                Creator planted Line #{m.cBug.lineNumber || 'N/A'} ("{m.cBug.description}"). Finding team failed to detect this bug. Stealth defense awarded to creator.
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Side-by-Side Bug Verification Rows */}
+                      <div style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.2rem' }}>
+                        {/* 1. Mapped Pairs */}
+                        {analysis.pairs.length > 0 && (
+                          <div>
+                            <div style={{ fontSize: '0.78rem', fontWeight: 800, color: '#4ade80', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                              <span>✅</span>
+                              <span>Verified Bug Alignments ({analysis.pairs.length} Matched Conceptually)</span>
+                            </div>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
+                              {analysis.pairs.map((pair, pIdx) => {
+                                const overrideKey = `${r.id}_h${pair.hBug.id || pair.hIdx}`;
+                                const currentStatus = bugOverrides[r.id]?.[overrideKey] || pair.status;
+
+                                return (
+                                  <div
+                                    key={pIdx}
+                                    style={{
+                                      display: 'grid',
+                                      gridTemplateColumns: '1fr auto 1fr auto',
+                                      gap: '1rem',
+                                      alignItems: 'center',
+                                      background: 'rgba(0, 0, 0, 0.4)',
+                                      border: currentStatus === 'rejected' ? '1px solid rgba(255,95,86,0.3)' : '1px solid rgba(74, 222, 128, 0.25)',
+                                      borderRadius: '12px',
+                                      padding: '1rem 1.2rem',
+                                    }}
+                                  >
+                                    {/* Left: Creator Bug */}
+                                    <div style={{ borderLeft: '3px solid #ff6b6b', paddingLeft: '0.8rem' }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                        <span style={{ fontSize: '0.72rem', color: '#ff6b6b', fontWeight: 800, textTransform: 'uppercase' }}>
+                                          Planted by {r.originalTeam} — Line #{pair.cBug.lineNumber || 'N/A'}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setActiveCodeInspector(prev => ({ ...prev, [r.id]: true }));
+                                            setHighlightedCodeLine(prev => ({ ...prev, [r.id]: pair.cBug.lineNumber }));
+                                          }}
+                                          style={{ background: 'transparent', border: 'none', color: '#00ffff', cursor: 'pointer', fontSize: '0.7rem', textDecoration: 'underline' }}
+                                        >
+                                          🔍 Focus in Code
+                                        </button>
+                                      </div>
+                                      <div style={{ color: '#e4e4f0', fontSize: '0.86rem', marginTop: '0.2rem' }}>
+                                        {pair.cBug.description}
+                                      </div>
+                                    </div>
+
+                                    {/* Center Connector */}
+                                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.2rem' }}>
+                                      <span style={{ fontSize: '1.1rem', color: '#4ade80' }}>⟷</span>
+                                      <span style={{
+                                        fontSize: '0.68rem',
+                                        fontWeight: 800,
+                                        color: pair.confidence >= 75 ? '#4ade80' : '#fbbf24',
+                                        background: pair.confidence >= 75 ? 'rgba(74,222,128,0.1)' : 'rgba(251,191,36,0.1)',
+                                        padding: '0.1rem 0.5rem',
+                                        borderRadius: '10px',
+                                      }}>
+                                        {pair.confidence}% MATCH
+                                      </span>
+                                      {pair.categoryName && (
+                                        <span style={{ fontSize: '0.64rem', color: '#aaa' }}>
+                                          {pair.categoryIcon}
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    {/* Right: Hunter Bug */}
+                                    <div style={{ borderLeft: '3px solid #4ade80', paddingLeft: '0.8rem' }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                        <span style={{ fontSize: '0.72rem', color: '#4ade80', fontWeight: 800, textTransform: 'uppercase' }}>
+                                          Reported by {r.reviewer} — Line #{pair.hBug.lineNumber || 'N/A'}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setActiveCodeInspector(prev => ({ ...prev, [r.id]: true }));
+                                            setHighlightedCodeLine(prev => ({ ...prev, [r.id]: pair.hBug.lineNumber }));
+                                          }}
+                                          style={{ background: 'transparent', border: 'none', color: '#00ffff', cursor: 'pointer', fontSize: '0.7rem', textDecoration: 'underline' }}
+                                        >
+                                          🔍 Focus in Code
+                                        </button>
+                                      </div>
+                                      <div style={{ color: '#e4e4f0', fontSize: '0.86rem', marginTop: '0.2rem' }}>
+                                        {pair.hBug.description}
+                                      </div>
+                                      {pair.hBug.fix && (
+                                        <div style={{ color: '#00ffff', fontSize: '0.76rem', marginTop: '0.3rem', fontFamily: 'Courier New, monospace' }}>
+                                          Fix: {pair.hBug.fix}
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    {/* Right: Admin Override Toggles */}
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleToggleBugOverride(r.id, overrideKey, 'confirmed')}
+                                        style={{
+                                          padding: '0.25rem 0.6rem',
+                                          borderRadius: '6px',
+                                          fontSize: '0.7rem',
+                                          fontWeight: 800,
+                                          cursor: 'pointer',
+                                          border: currentStatus === 'confirmed' || currentStatus === 'CONFIRMED' ? '1px solid #4ade80' : '1px solid rgba(74,222,128,0.3)',
+                                          background: currentStatus === 'confirmed' || currentStatus === 'CONFIRMED' ? 'rgba(74,222,128,0.3)' : 'transparent',
+                                          color: '#4ade80',
+                                        }}
+                                      >
+                                        ✓ Valid Match
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleToggleBugOverride(r.id, overrideKey, 'rejected')}
+                                        style={{
+                                          padding: '0.25rem 0.6rem',
+                                          borderRadius: '6px',
+                                          fontSize: '0.7rem',
+                                          fontWeight: 800,
+                                          cursor: 'pointer',
+                                          border: currentStatus === 'rejected' ? '1px solid #ff5f56' : '1px solid rgba(255,95,86,0.3)',
+                                          background: currentStatus === 'rejected' ? 'rgba(255,95,86,0.3)' : 'transparent',
+                                          color: '#ff5f56',
+                                        }}
+                                      >
+                                        ✕ Reject Claim
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* 2. Unmatched Hunter Bugs (Potential False Claims / Spam) */}
+                        {analysis.unmatchedHunterBugs.length > 0 && (
+                          <div style={{ marginTop: '0.5rem' }}>
+                            <div style={{ fontSize: '0.78rem', fontWeight: 800, color: '#fbbf24', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                              <span>⚠️</span>
+                              <span>Unmatched Hunter Claims — False Claim Penalty Applied ({analysis.unmatchedHunterBugs.length})</span>
+                            </div>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
+                              {analysis.unmatchedHunterBugs.map(({ hBug, hIdx }, uIdx) => {
+                                const overrideKey = `${r.id}_h${hBug.id || hIdx}`;
+                                const isBonus = bugOverrides[r.id]?.[overrideKey] === 'bonus';
+
+                                return (
+                                  <div
+                                    key={uIdx}
+                                    style={{
+                                      display: 'flex',
+                                      justifyContent: 'space-between',
+                                      alignItems: 'center',
+                                      background: 'rgba(251, 191, 36, 0.04)',
+                                      border: isBonus ? '1px solid rgba(0, 255, 255, 0.4)' : '1px solid rgba(251, 191, 36, 0.25)',
+                                      borderRadius: '12px',
+                                      padding: '0.9rem 1.2rem',
+                                      gap: '1rem',
+                                    }}
+                                  >
+                                    <div style={{ flex: 1, borderLeft: '3px solid #fbbf24', paddingLeft: '0.8rem' }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                                        <span style={{ fontSize: '0.72rem', color: '#fbbf24', fontWeight: 800 }}>
+                                          Reported by {r.reviewer} — Line #{hBug.lineNumber || 'N/A'}
+                                        </span>
+                                        <span style={{ background: isBonus ? 'rgba(0,255,255,0.15)' : 'rgba(255,95,86,0.15)', color: isBonus ? '#00ffff' : '#ff7777', padding: '0.1rem 0.5rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 800 }}>
+                                          {isBonus ? '⭐ ACCEPTED AS BONUS GENUINE BUG (+75 pts)' : '⚠️ UNMATCHED BY CREATOR (-40 pts penalty)'}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setActiveCodeInspector(prev => ({ ...prev, [r.id]: true }));
+                                            setHighlightedCodeLine(prev => ({ ...prev, [r.id]: hBug.lineNumber }));
+                                          }}
+                                          style={{ background: 'transparent', border: 'none', color: '#00ffff', cursor: 'pointer', fontSize: '0.7rem', textDecoration: 'underline' }}
+                                        >
+                                          🔍 Focus in Code
+                                        </button>
+                                      </div>
+                                      <div style={{ color: '#e4e4f0', fontSize: '0.85rem', marginTop: '0.2rem' }}>
+                                        {hBug.description}
+                                      </div>
+                                      {hBug.fix && (
+                                        <div style={{ color: '#00ffff', fontSize: '0.75rem', marginTop: '0.2rem', fontFamily: 'Courier New, monospace' }}>
+                                          Proposed Fix: {hBug.fix}
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    <div>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleToggleBugOverride(r.id, overrideKey, 'bonus')}
+                                        style={{
+                                          padding: '0.35rem 0.8rem',
+                                          borderRadius: '6px',
+                                          fontSize: '0.72rem',
+                                          fontWeight: 800,
+                                          cursor: 'pointer',
+                                          border: isBonus ? '1px solid #00ffff' : '1px solid rgba(0,255,255,0.3)',
+                                          background: isBonus ? 'rgba(0,255,255,0.2)' : 'transparent',
+                                          color: '#00ffff',
+                                        }}
+                                      >
+                                        {isBonus ? '✓ Marked as Bonus' : '⭐ Grant Bonus Bug'}
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* 3. Missed Creator Bugs (Stealth Defense) */}
+                        {analysis.missedCreatorBugs.length > 0 && (
+                          <div style={{ marginTop: '0.5rem' }}>
+                            <div style={{ fontSize: '0.78rem', fontWeight: 800, color: '#c77dff', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                              <span>🛡️</span>
+                              <span>Missed Planted Bugs — Creating Team Stealth Defense ({analysis.missedCreatorBugs.length} Undetected)</span>
+                            </div>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
+                              {analysis.missedCreatorBugs.map(({ cBug }, mIdx) => (
+                                <div
+                                  key={mIdx}
+                                  style={{
+                                    background: 'rgba(157, 78, 221, 0.05)',
+                                    border: '1px solid rgba(157, 78, 221, 0.3)',
+                                    borderRadius: '12px',
+                                    padding: '0.9rem 1.2rem',
+                                    borderLeft: '3px solid #9d4edd',
+                                  }}
+                                >
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                                    <span style={{ fontSize: '0.72rem', color: '#c77dff', fontWeight: 800 }}>
+                                      Planted by {r.originalTeam} — Line #{cBug.lineNumber || 'N/A'}
+                                    </span>
+                                    <span style={{ background: 'rgba(157,78,221,0.2)', color: '#e0aaff', padding: '0.1rem 0.5rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 800 }}>
+                                      🛡️ STEALTH DEFENSE HELD (+80 pts)
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setActiveCodeInspector(prev => ({ ...prev, [r.id]: true }));
+                                        setHighlightedCodeLine(prev => ({ ...prev, [r.id]: cBug.lineNumber }));
+                                      }}
+                                      style={{ background: 'transparent', border: 'none', color: '#00ffff', cursor: 'pointer', fontSize: '0.7rem', textDecoration: 'underline' }}
+                                    >
+                                      🔍 Focus in Code
+                                    </button>
+                                  </div>
+                                  <div style={{ color: '#e4e4f0', fontSize: '0.85rem', marginTop: '0.2rem' }}>
+                                    {cBug.description}
+                                  </div>
+                                  <div style={{ color: '#8888aa', fontSize: '0.72rem', marginTop: '0.2rem', fontStyle: 'italic' }}>
+                                    Finding team failed to report this bug. Stealth defense successfully held.
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   );
-                })
-              )}
+                });
+              })()}
             </div>
           </div>
         )}
