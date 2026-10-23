@@ -1,0 +1,43 @@
+/* Kept with the lazy landing screen so homepage navigation retains its original
+   compact layout without loading the full portal stylesheet for Bug Arena. */
+.nav-family-btn {
+  position: absolute;
+  top: 100%;
+  right: 2rem;
+  margin-top: 0.6rem;
+  background: rgba(7, 7, 10, 0.7);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.25rem 0.55rem;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-size: 0.72rem;
+  font-family: var(--font-tech);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  white-space: nowrap;
+  outline: none;
+  z-index: 100;
+}
+
+.nav-family-btn img {
+  width: 12px;
+  height: 12px;
+  opacity: 0.7;
+  transition: opacity 0.25s ease;
+}
+
+.nav-family-btn:hover {
+  color: var(--accent-cyan);
+  border-color: rgba(0, 255, 255, 0.3);
+  background: rgba(0, 255, 255, 0.08);
+  box-shadow: 0 0 10px rgba(0, 255, 255, 0.15);
+}
+
+.nav-family-btn:hover img { opacity: 1; }
+.nav-family-btn:active { transform: scale(0.97); }

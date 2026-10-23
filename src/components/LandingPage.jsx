@@ -3,6 +3,7 @@ import { Canvas } from '@react-three/fiber';
 import ThreeScene from './ThreeScene';
 import { NexusParticles } from './ThreeModels';
 import nexusLogo from '../assets/nexus-logo.svg';
+import './LandingPage.css';
 
 const LandingPage = ({ onNavigate }) => {
   const scrollContainerRef = useRef(null);
