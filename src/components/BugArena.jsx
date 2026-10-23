@@ -1592,11 +1592,14 @@ const BugArena = ({ onAbort }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      if (!response.ok) throw new Error('Submission save failed');
+      if (!response.ok) {
+        const failure = await response.json().catch(() => ({}));
+        throw new Error(failure.error || 'Submission save failed');
+      }
     } catch (err) {
       console.warn('Cloud registry sync error:', err);
       setIsSubmitting(false);
-      showToast('Could not save your code. Please try submitting again.', 'error');
+      showToast(err.message || 'Could not save your code. Please try submitting again.', 'error');
       return;
     }
 

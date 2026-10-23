@@ -357,12 +357,28 @@ app.post('/api/submissions', async (req, res) => {
                     input: { $objectToArray: { $ifNull: ['$data', {}] } },
                     as: 'entry',
                     cond: {
-                      $or: [
+                      // $cond is deliberately used instead of $or: Mongo can
+                      // evaluate every $or branch, which made metadata arrays
+                      // (reports) reach $toLower and reject a code submission.
+                      $cond: [
                         { $in: ['$$entry.k', ['reports', 'globalState', 'verifications']] },
+                        true,
                         {
                           $and: [
                             { $ne: [{ $ifNull: ['$$entry.v.registrationId', ''] }, ownerRegistrationId] },
-                            { $ne: [{ $toLower: { $ifNull: ['$$entry.v.team', ''] } }, ownerTeam] },
+                            {
+                              $ne: [
+                                {
+                                  $toLower: {
+                                    $convert: {
+                                      input: { $ifNull: ['$$entry.v.team', ''] },
+                                      to: 'string', onError: '', onNull: '',
+                                    },
+                                  },
+                                },
+                                ownerTeam,
+                              ],
+                            },
                           ],
                         },
                       ],
