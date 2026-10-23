@@ -3295,14 +3295,24 @@ const BugArena = ({ onAbort }) => {
         headers: { 'Content-Type': 'application/json', 'x-admin-session': adminAuthToken },
         body: JSON.stringify({ phase: newPhase }),
       });
-      if (!response.ok) throw new Error('Phase update rejected');
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (response.status === 401) {
+          setAdminAuthToken('');
+          setIsAdminLoggedIn(false);
+          try { sessionStorage.removeItem('ba_admin_token'); } catch {}
+          setAdminModalOpen(true);
+          showToast('Your admin session expired. Please sign in again to change the phase.', 'error');
+          return;
+        }
+        throw new Error(data.error || `Phase update failed (${response.status})`);
+      }
       setAdminRegistryData(prev => ({ ...(prev || {}), globalState: data.globalState }));
       setGlobalEventPhase(newPhase); // update local admin view immediately
       const dir = isGoingBack ? '← Reversed' : '→ Advanced';
       showToast(`${dir} — Phase: ${PHASE_LABELS[newPhase].label}`);
     } catch (e) {
-      showToast('Error updating global phase — check your connection', 'error');
+      showToast(e.message || 'Could not update the event phase. Check the backend connection.', 'error');
     }
   };
 
@@ -3382,12 +3392,16 @@ const BugArena = ({ onAbort }) => {
                         if(window.prompt('Type WIPE to delete all submitted codes & bug reports from the database. (Registrations & Cheat history remain)') === 'WIPE') {
                           try {
                             const newReg = { globalState: { phase: 'pre_event', history: [], lastChanged: Date.now() }, reports: [] };
-                            await fetch(REGISTRY_URL, { method: 'PUT', headers: {'Content-Type': 'application/json', 'x-admin-session': adminAuthToken}, body: JSON.stringify(newReg) });
+                            const wipeResponse = await fetch(REGISTRY_URL, { method: 'PUT', headers: {'Content-Type': 'application/json', 'x-admin-session': adminAuthToken}, body: JSON.stringify(newReg) });
+                            if (!wipeResponse.ok) {
+                              const failure = await wipeResponse.json().catch(() => ({}));
+                              throw new Error(failure.error || 'Wipe request was rejected');
+                            }
                             setGlobalEventPhase('pre_event');
                             fetchAdminRegistryData();
                             showToast('All codes wiped and event reset!', 'success');
                           } catch (e) {
-                            showToast('Wipe failed', 'error');
+                            showToast(e.message || 'Wipe failed', 'error');
                           }
                         }
                       }}
