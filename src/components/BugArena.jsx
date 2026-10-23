@@ -1183,8 +1183,9 @@ const BugArena = ({ onAbort }) => {
     setIsLoadingAdminData(false);
   };
 
-  // Full dashboard data is comparatively heavy. Keep it as a low-frequency
-  // consistency refresh; instant proctoring alerts use the dedicated SSE feed.
+  // Full dashboard data includes every source file and report. Keep it as a
+  // very low-frequency fallback; phase and proctoring changes are already
+  // delivered immediately through their dedicated endpoints.
   useEffect(() => {
     if (!isAdminLoggedIn) return;
     const intervalId = setInterval(async () => {
@@ -1217,7 +1218,7 @@ const BugArena = ({ onAbort }) => {
         const cheatData = await cheatRes.json();
         if (Array.isArray(cheatData)) setAdminCheatReports(cheatData);
       } catch (e) { /* silent */ }
-    }, 20000);
+    }, 60000);
     return () => clearInterval(intervalId);
   }, [isAdminLoggedIn]);
 

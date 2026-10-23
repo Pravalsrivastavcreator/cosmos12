@@ -111,12 +111,36 @@ const Registry = mongoose.model('Registry', RegistrySchema);
 // participant repeatedly download the full registry document.
 const phaseSubscribers = new Set();
 const adminAlertSubscribers = new Set();
+let phaseCache = { phase: 'pre_event', lastChanged: 0, history: [] };
+let phaseCacheAt = 0;
+let pendingPhaseRead = null;
 const publishSse = (subscribers, event, payload) => {
   const message = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
   subscribers.forEach(res => { res.write(message); res.flush?.(); });
 };
-const publishPhase = (globalState) => publishSse(phaseSubscribers, 'phase', globalState);
+const publishPhase = (globalState) => {
+  phaseCache = globalState;
+  phaseCacheAt = Date.now();
+  publishSse(phaseSubscribers, 'phase', globalState);
+};
 const publishAdminAlert = (alert) => publishSse(adminAlertSubscribers, 'proctoring-alert', alert);
+
+// One cached, coalesced read prevents a 100-student join from triggering 100
+// full registry document reads at the same time. Phase writes refresh this
+// immediately, so clients still receive live transitions through SSE.
+const getCachedGlobalState = async () => {
+  if (Date.now() - phaseCacheAt < 5000) return phaseCache;
+  if (!pendingPhaseRead) {
+    pendingPhaseRead = getRegistryDoc()
+      .then(doc => {
+        phaseCache = doc.data?.globalState || phaseCache;
+        phaseCacheAt = Date.now();
+        return phaseCache;
+      })
+      .finally(() => { pendingPhaseRead = null; });
+  }
+  return pendingPhaseRead;
+};
 
 const RegistrationSchema = new mongoose.Schema({
   registrationId:       { type: String, unique: true },
@@ -170,9 +194,8 @@ const getRegistryDoc = async () => {
 // reports registry. SSE pushes host transitions to all connected players.
 app.get('/api/event-phase', async (_req, res) => {
   try {
-    const doc = await getRegistryDoc();
     res.set('Cache-Control', 'no-store');
-    res.json(doc.data?.globalState || { phase: 'pre_event', lastChanged: 0, history: [] });
+    res.json(await getCachedGlobalState());
   } catch (err) {
     res.status(500).json({ error: 'Server error.' });
   }
@@ -188,7 +211,7 @@ app.get('/api/event-phase/stream', (req, res) => {
   res.flushHeaders();
   phaseSubscribers.add(res);
   res.write('retry: 1500\n\n');
-  getRegistryDoc().then(doc => publishSse(new Set([res]), 'phase', doc.data?.globalState || { phase: 'pre_event' })).catch(() => {});
+  getCachedGlobalState().then(globalState => publishSse(new Set([res]), 'phase', globalState)).catch(() => {});
   const heartbeat = setInterval(() => { res.write(': keepalive\n\n'); res.flush?.(); }, 25000);
   req.on('close', () => { clearInterval(heartbeat); phaseSubscribers.delete(res); });
 });
