@@ -53,7 +53,7 @@ app.use(cors({
     cb(new Error(`CORS: origin "${origin}" not allowed`));
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-session'],
   credentials: true,
 }));
 app.options(/.*/, cors()); // Pre-flight for all routes
