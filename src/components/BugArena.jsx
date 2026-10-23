@@ -599,6 +599,15 @@ const BugArena = ({ onAbort }) => {
   // Ref to hold the previous submission key when editing code after submit
   // (survives submittedKey being cleared to show the editor again)
   const pendingEditKeyRef = useRef(null);
+  // Stable key used by the background draft saver before a student presses
+  // Submit. The server promotes this draft when the host closes coding.
+  const draftKeyRef = useRef('');
+  const liveDraftRef = useRef({});
+  const getDraftKey = () => {
+    if (!draftKeyRef.current) draftKeyRef.current = generate6CharKey();
+    return draftKeyRef.current;
+  };
+  liveDraftRef.current = { teamName, registrationId, language, code, createdBugs, decodedData, foundBugs, submittedKey };
 
   // Restore session from sessionStorage on initial load
   useEffect(() => {
@@ -644,6 +653,7 @@ const BugArena = ({ onAbort }) => {
         if (parsed.activeCheatReportId) setActiveCheatReportId(parsed.activeCheatReportId);
         if (parsed.reentryRequested) setReentryRequested(parsed.reentryRequested);
         if (parsed.submittedKey) setSubmittedKey(parsed.submittedKey);
+        if (parsed.draftKey) draftKeyRef.current = parsed.draftKey;
         if (parsed.phase && parsed.phase !== 'admin') setPhase(parsed.phase);
 
         // Verify with server if this session has an active lock
@@ -699,6 +709,7 @@ const BugArena = ({ onAbort }) => {
         activeCheatReportId,
         reentryRequested,
         submittedKey,
+        draftKey: draftKeyRef.current,
       }));
     } catch { /* ignore */ }
   }, [teamName, registrationId, isRegistered, isSetup, language, phase, isLocked, activeCheatReportId, reentryRequested, submittedKey]);
@@ -764,10 +775,100 @@ const BugArena = ({ onAbort }) => {
           if (eventState?.phase) setGlobalEventPhase(eventState.phase);
         } catch { /* ignore malformed event */ }
       });
+      // The organiser is about to close coding/hunting. Flush the latest
+      // local fields immediately; the server waits briefly, promotes drafts,
+      // then applies the non-bypassable phase lock.
+      stream.addEventListener('phase-closing', (event) => {
+        try {
+          const { currentPhase } = JSON.parse(event.data);
+          const draft = liveDraftRef.current;
+          if (!draft.teamName?.trim()) return;
+          if (currentPhase === 'coding') {
+            const key = draft.submittedKey || pendingEditKeyRef.current || getDraftKey();
+            fetch(`${SERVER_BASE}/api/drafts/code`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                key, team: draft.teamName.trim(), registrationId: draft.registrationId || '', language: draft.language,
+                code: draft.code, createdBugs: draft.createdBugs,
+                bugLineNumber: draft.createdBugs.map(b => b.lineNumber || 'N/A').join(', '),
+                bugInfo: draft.createdBugs.map(b => b.description).filter(Boolean).join(' | '),
+                timestamp: Date.now(), isDraft: true,
+              }),
+            }).catch(() => {});
+          }
+          if (currentPhase === 'hunting' && draft.decodedData) {
+            const reportSlot = `${draft.registrationId || draft.teamName.trim().toLowerCase()}::${draft.decodedData.key || 'N/A'}::${(draft.decodedData.language || 'python').toLowerCase()}`;
+            fetch(`${SERVER_BASE}/api/drafts/report`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                id: `R_DRAFT_${reportSlot.replace(/[^A-Za-z0-9]/g, '_').slice(0, 80)}`, reportSlot,
+                reviewerRegistrationId: draft.registrationId || '', reviewer: draft.teamName.trim(),
+                originalTeam: draft.decodedData.team || 'Unknown', key: draft.decodedData.key || 'N/A',
+                language: draft.decodedData.language || 'python', foundBugs: draft.foundBugs,
+                originalCreatedBugs: draft.decodedData.createdBugs || [], originalCode: draft.decodedData.code || '',
+                timestamp: Date.now(), isDraft: true,
+              }),
+            }).catch(() => {});
+          }
+        } catch { /* ignore a malformed closing notice */ }
+      });
     }
     const intervalId = setInterval(syncGlobalPhase, 30000);
     return () => { clearInterval(intervalId); stream?.close(); };
   }, [isRegistered]);
+
+  // Save work-in-progress without marking it submitted. This is debounced so
+  // typing remains smooth even with 100 participants. The server finalizes the
+  // latest saved draft at the exact moment the administrator changes phase.
+  useEffect(() => {
+    if (!isSetup || !teamName.trim() || globalEventPhase !== 'coding') return;
+    const timer = setTimeout(() => {
+      const key = submittedKey || pendingEditKeyRef.current || getDraftKey();
+      fetch(`${SERVER_BASE}/api/drafts/code`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          key,
+          team: teamName.trim(),
+          registrationId: registrationId || '',
+          language,
+          code,
+          createdBugs,
+          bugLineNumber: createdBugs.map(b => b.lineNumber || 'N/A').join(', '),
+          bugInfo: createdBugs.map(b => b.description).filter(Boolean).join(' | '),
+          timestamp: Date.now(),
+          isDraft: true,
+        }),
+      }).catch(() => {});
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [isSetup, teamName, registrationId, language, code, createdBugs, submittedKey, globalEventPhase]);
+
+  useEffect(() => {
+    if (!isSetup || !teamName.trim() || !decodedData || globalEventPhase !== 'hunting') return;
+    const timer = setTimeout(() => {
+      const reportSlot = `${registrationId || teamName.trim().toLowerCase()}::${decodedData?.key || 'N/A'}::${(decodedData?.language || 'python').toLowerCase()}`;
+      fetch(`${SERVER_BASE}/api/drafts/report`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: `R_DRAFT_${reportSlot.replace(/[^A-Za-z0-9]/g, '_').slice(0, 80)}`,
+          reportSlot,
+          reviewerRegistrationId: registrationId || '',
+          reviewer: teamName.trim(),
+          originalTeam: decodedData?.team || 'Unknown',
+          key: decodedData?.key || 'N/A',
+          language: decodedData?.language || 'python',
+          foundBugs,
+          originalCreatedBugs: decodedData?.createdBugs || [],
+          originalCode: decodedData?.code || '',
+          timestamp: Date.now(),
+          isDraft: true,
+        }),
+      }).catch(() => {});
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [isSetup, teamName, registrationId, decodedData, foundBugs, globalEventPhase]);
 
   // The host phase is authoritative: players cannot keep editing a previous
   // phase after an event transition.
@@ -1539,9 +1640,10 @@ const BugArena = ({ onAbort }) => {
     // Use the SAME key as the previous submission (if editing) so admin sees one entry.
     // Only generate a new key on the very first submission for this team.
     // pendingEditKeyRef holds the key when user clicked "Edit & Resubmit" (submittedKey was cleared for UX)
-    const existingKey = submittedKey || pendingEditKeyRef.current;
+    const existingKey = submittedKey || pendingEditKeyRef.current || draftKeyRef.current;
     const isResubmit = !!existingKey;
     const key = isResubmit ? existingKey : generate6CharKey();
+    draftKeyRef.current = key;
     pendingEditKeyRef.current = null; // consumed
 
     const payload = {
@@ -2600,7 +2702,7 @@ const BugArena = ({ onAbort }) => {
           <h2 className="ba-waitroom-title" style={{ color: '#ff5f56' }}>Coding Phase Closed</h2>
           <p className="ba-waitroom-desc">
             The coding window has closed.<br />
-            No further code can be edited or submitted. Head to the <strong>Exchange Portal</strong>.
+            Your latest saved work has been <strong>automatically submitted</strong>. No further editing is allowed; head to the <strong>Exchange Portal</strong>.
           </p>
           <div className="ba-waitroom-status ba-waitroom-status--red">
             <span className="ba-waitroom-pulse-dot ba-waitroom-pulse-dot--red" />
@@ -2968,7 +3070,7 @@ const BugArena = ({ onAbort }) => {
           <h2 className="ba-waitroom-title" style={{ color: '#4ade80' }}>{globalEventPhase === 'post_event' ? 'Hunting Phase Ended' : 'Bug Hunting Is Not Open'}</h2>
           <p className="ba-waitroom-desc">
             {globalEventPhase === 'post_event'
-              ? 'The event has concluded. Bug reporting is now locked. Await the final results from the organizers.'
+              ? 'The event has concluded. Your latest saved bug report has been automatically submitted and reporting is now locked. Await the final results from the organizers.'
               : 'Wait for the administrator to open the Bug Hunting phase. Reports cannot be edited or submitted yet.'}
           </p>
           <div className="ba-waitroom-status ba-waitroom-status--green">

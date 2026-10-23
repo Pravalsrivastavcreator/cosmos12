@@ -204,6 +204,10 @@ const getRegistryDoc = async () => {
   return doc;
 };
 
+// A safe object-key form for per-player drafts. Registration IDs are already
+// safe, but this also supports legacy team names without allowing dotted paths.
+const draftKeyFor = (value) => String(value || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 120);
+
 // Lightweight phase channel: one tiny payload instead of the shared code and
 // reports registry. SSE pushes host transitions to all connected players.
 app.get('/api/event-phase', async (_req, res) => {
@@ -237,13 +241,54 @@ app.patch('/api/event-phase', requireAdmin, async (req, res) => {
     if (!allowed.includes(phase)) return res.status(400).json({ error: 'Invalid event phase.' });
     const doc = await getRegistryDoc();
     const previous = doc.data?.globalState?.phase || 'pre_event';
+    // Ask connected clients to flush their in-memory work before the database
+    // lock changes. The small, bounded window is only for drafts while the
+    // OLD phase is still active; the final promotion below then locks it.
+    if ((previous === 'coding' || previous === 'hunting') && previous !== phase) {
+      publishSse(phaseSubscribers, 'phase-closing', { currentPhase: previous, nextPhase: phase });
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+    const nextData = { ...(doc.data || {}) };
+    const drafts = nextData.drafts || { codes: {}, reports: {} };
+    const now = Date.now();
+
+    // The browser continuously stores a lightweight working draft during the
+    // live phases. On a phase transition the server promotes the newest draft
+    // into the normal submissions/reports list before the phase is locked.
+    // This makes half-written work visible to the admin even when a student
+    // never pressed Submit.
+    if (previous === 'coding' && phase !== 'coding') {
+      Object.values(drafts.codes || {}).forEach(draft => {
+        if (!draft?.key) return;
+        const existing = nextData[draft.key];
+        if (!existing || Number(draft.updatedAt || 0) > Number(existing.updatedAt || existing.timestamp || 0)) {
+          nextData[draft.key] = { ...draft, isAutoSubmitted: true, autoSubmittedAt: now };
+        }
+      });
+    }
+    if (previous === 'hunting' && phase !== 'hunting') {
+      const reportsBySlot = new Map();
+      (Array.isArray(nextData.reports) ? nextData.reports : []).forEach(report => {
+        const slot = report.reportSlot || `${report.reviewerRegistrationId || report.reviewer}::${report.key}::${report.language}`;
+        reportsBySlot.set(slot, report);
+      });
+      Object.values(drafts.reports || {}).forEach(draft => {
+        if (!draft?.reportSlot) return;
+        const existing = reportsBySlot.get(draft.reportSlot);
+        if (!existing || Number(draft.updatedAt || 0) > Number(existing.updatedAt || existing.timestamp || 0)) {
+          reportsBySlot.set(draft.reportSlot, { ...draft, isAutoSubmitted: true, autoSubmittedAt: now });
+        }
+      });
+      nextData.reports = [...reportsBySlot.values()];
+    }
+
     const globalState = {
       ...(doc.data?.globalState || {}),
       phase,
       lastChanged: Date.now(),
       history: [...(doc.data?.globalState?.history || []).slice(-9), { from: previous, to: phase, at: new Date().toISOString() }],
     };
-    doc.data = { ...(doc.data || {}), globalState };
+    doc.data = { ...nextData, globalState };
     doc.markModified('data');
     await doc.save();
     publishPhase(globalState);
@@ -251,6 +296,48 @@ app.patch('/api/event-phase', requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('Event phase update error:', err);
     res.status(500).json({ error: 'Server error.' });
+  }
+});
+
+// Live drafts are intentionally separate from submitted records. They are
+// only promoted by the authenticated organiser's phase transition above.
+app.post('/api/drafts/code', async (req, res) => {
+  try {
+    const draft = req.body || {};
+    const slot = draftKeyFor(draft.registrationId || draft.team);
+    if (!slot || !/^[A-Z0-9]{6}$/.test(draft.key || '') || !draft.team || !draft.language) {
+      return res.status(400).json({ error: 'Incomplete code draft.' });
+    }
+    draft.updatedAt = Date.now();
+    const result = await Registry.updateOne(
+      { singletonId: 'registry', 'data.globalState.phase': 'coding' },
+      { $set: { [`data.drafts.codes.${slot}`]: draft } }
+    );
+    if (result.matchedCount !== 1) return res.status(409).json({ error: 'Coding phase is closed.' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Code draft save error:', err);
+    res.status(500).json({ error: 'Could not save draft.' });
+  }
+});
+
+app.post('/api/drafts/report', async (req, res) => {
+  try {
+    const draft = req.body || {};
+    const slot = draftKeyFor(draft.reportSlot);
+    if (!slot || !draft.reportSlot || !draft.reviewer || !draft.language || !Array.isArray(draft.foundBugs)) {
+      return res.status(400).json({ error: 'Incomplete report draft.' });
+    }
+    draft.updatedAt = Date.now();
+    const result = await Registry.updateOne(
+      { singletonId: 'registry', 'data.globalState.phase': 'hunting' },
+      { $set: { [`data.drafts.reports.${slot}`]: draft } }
+    );
+    if (result.matchedCount !== 1) return res.status(409).json({ error: 'Bug hunting phase is closed.' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Report draft save error:', err);
+    res.status(500).json({ error: 'Could not save draft.' });
   }
 });
 
