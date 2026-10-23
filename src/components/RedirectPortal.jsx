@@ -1,10 +1,10 @@
-import React, { useRef, useMemo, useEffect, useState } from 'react';
+import React, { useRef, useMemo, useEffect, useState, Suspense } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { Stars } from '@react-three/drei';
 import * as THREE from 'three';
 import './RedirectPortal.css';
 import Puzzles from './Puzzles';
-import BugArena from './BugArena';
+const BugArena = React.lazy(() => import('./BugArena'));
 import Events from './Events';
 import team1 from '../assets/team1.jpg';
 import team2 from '../assets/team2.jpg';
@@ -1043,7 +1043,9 @@ const RedirectPortal = ({ target, onAbort }) => {
           <Events onAbort={onAbort} />
         ) : target === 'bugarena' ? (
           /* ── Bug Arena: code exchange & bug hunt ── */
-          <BugArena onAbort={onAbort} />
+          <Suspense fallback={<div className="ba-fade-in" style={{ minHeight: '60vh', display: 'grid', placeItems: 'center', color: '#00ffff' }}>Loading Bug Arena…</div>}>
+            <BugArena onAbort={onAbort} />
+          </Suspense>
         ) : target === 'puzzles' ? (
           /* ── Puzzles: show content immediately, no intro / spacer ── */
           <Puzzles onAbort={onAbort} />

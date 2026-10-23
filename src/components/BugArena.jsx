@@ -39,6 +39,11 @@ const LANGUAGES = [
   { id: 'csharp', name: 'C#', ext: '.cs' },
 ];
 
+// Bug Arena is operated in four isolated competition tracks. Keeping this
+// explicit prevents a submission from being reviewed against another language.
+const EVENT_LANGUAGE_IDS = ['python', 'java', 'c', 'cpp'];
+const EVENT_LANGUAGES = LANGUAGES.filter(lang => EVENT_LANGUAGE_IDS.includes(lang.id));
+
 // ─── Keyword Sets for Syntax Highlighting ───────────────────────────────────
 const LANGUAGE_KEYWORDS = {
   python: ['def', 'class', 'if', 'elif', 'else', 'for', 'while', 'return', 'import', 'from', 'as', 'try', 'except', 'finally', 'with', 'yield', 'lambda', 'pass', 'break', 'continue', 'and', 'or', 'not', 'in', 'is', 'None', 'True', 'False', 'print', 'self', 'raise', 'del', 'global', 'nonlocal', 'assert', 'async', 'await'],
@@ -446,7 +451,7 @@ const CodeEditor = React.memo(({ code, onChange, language, readOnly = false, tea
 });
 
 // ─── Admin Login Modal ──────────────────────────────────────────────────────
-const AdminLoginModal = ({ onClose, onLogin }) => {
+const AdminLoginModal = ({ onClose, onLogin, isAuthenticating }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
 
@@ -462,6 +467,7 @@ const AdminLoginModal = ({ onClose, onLogin }) => {
           <div className="ba-admin-header-title">🔐 Admin Authentication</div>
           <button
             onClick={onClose}
+            disabled={isAuthenticating}
             style={{ background: 'transparent', border: 'none', color: '#fff', fontSize: '1.2rem', cursor: 'pointer' }}
           >
             ✕
@@ -477,6 +483,7 @@ const AdminLoginModal = ({ onClose, onLogin }) => {
               className="ba-field-input"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              disabled={isAuthenticating}
               placeholder="Username..."
               style={{ borderColor: 'rgba(251, 191, 36, 0.3)' }}
               autoFocus
@@ -491,16 +498,18 @@ const AdminLoginModal = ({ onClose, onLogin }) => {
               className="ba-field-input"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              disabled={isAuthenticating}
               placeholder="Password..."
               style={{ borderColor: 'rgba(251, 191, 36, 0.3)' }}
             />
           </div>
           <button
             type="submit"
+            disabled={isAuthenticating}
             className="ba-neon-btn ba-btn-cyan"
             style={{ width: '100%', marginTop: '1rem', background: 'rgba(251, 191, 36, 0.2)', borderColor: 'rgba(251, 191, 36, 0.6)', color: '#fbbf24' }}
           >
-            Authenticate 🚀
+            {isAuthenticating ? 'Authenticating…' : 'Authenticate 🚀'}
           </button>
         </form>
       </div>
@@ -533,18 +542,14 @@ const BugArena = ({ onAbort }) => {
   const [typedText, setTypedText] = useState('');
   const fullText = '> Initializing Bug Arena Protocol...';
 
-  // ── Registration / Payment State ──
+  // ── Registration / Organizer Approval State ──
   const [regPhase, setRegPhase] = useState('form'); // 'form' | 'qr' | 'done'
   const [isRegistered, setIsRegistered] = useState(false);
   const [registrationId, setRegistrationId] = useState('');
   const [paymentStatus, setPaymentStatus] = useState('pending'); // 'pending' | 'verified' | 'rejected'
-  const [regTeamType, setRegTeamType] = useState('solo'); // 'solo' | 'duo'
   const [regMembers, setRegMembers] = useState([
-    { name: '', upiId: '', email: '' },
-    { name: '', upiId: '', email: '' },
+    { name: '', email: '', phone: '' },
   ]);
-  const [paymentScreenshot, setPaymentScreenshot] = useState(null);
-  const [paymentScreenshotPreview, setPaymentScreenshotPreview] = useState('');
   const [isRegistering, setIsRegistering] = useState(false);
   const [regError, setRegError] = useState('');
 
@@ -558,6 +563,7 @@ const BugArena = ({ onAbort }) => {
 
   // ── Admin Portal State ──
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
+  const [isAdminAuthenticating, setIsAdminAuthenticating] = useState(false);
   const [adminModalOpen, setAdminModalOpen] = useState(false);
   const [adminActiveTab, setAdminActiveTab] = useState('registrations'); // 'registrations' | 'teams' | 'matcher' | 'compare' | 'proctoring'
   const [adminRegistryData, setAdminRegistryData] = useState(null);
@@ -574,6 +580,7 @@ const BugArena = ({ onAbort }) => {
   const [compareSearchQuery, setCompareSearchQuery] = useState('');
   const [expandedAiDossier, setExpandedAiDossier] = useState({});
   const [bugOverrides, setBugOverrides] = useState({});
+  const [reviewedVerifications, setReviewedVerifications] = useState({});
   const [activeCodeInspector, setActiveCodeInspector] = useState({}); // { [reportId]: boolean }
   const [highlightedCodeLine, setHighlightedCodeLine] = useState({}); // { [reportId]: lineNumber }
   const [showTrackLeaderboard, setShowTrackLeaderboard] = useState(false);
@@ -585,13 +592,9 @@ const BugArena = ({ onAbort }) => {
   const [reentryRequested, setReentryRequested] = useState(false);
   const [unlockGracePeriod, setUnlockGracePeriod] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [workspaceUnlocked, setWorkspaceUnlocked] = useState(() => {
-    try {
-      return sessionStorage.getItem('ba_workspace_unlocked') === 'true';
-    } catch {
-      return false;
-    }
-  });
+  const fullscreenStartedRef = useRef(false);
+  const globalPhaseRef = useRef(globalEventPhase);
+  globalPhaseRef.current = globalEventPhase;
   // Ref to hold the previous submission key when editing code after submit
   // (survives submittedKey being cleared to show the editor again)
   const pendingEditKeyRef = useRef(null);
@@ -639,7 +642,7 @@ const BugArena = ({ onAbort }) => {
         if (parsed.isLocked) setIsLocked(parsed.isLocked);
         if (parsed.activeCheatReportId) setActiveCheatReportId(parsed.activeCheatReportId);
         if (parsed.reentryRequested) setReentryRequested(parsed.reentryRequested);
-        if (parsed.workspaceUnlocked) setWorkspaceUnlocked(parsed.workspaceUnlocked);
+        if (parsed.submittedKey) setSubmittedKey(parsed.submittedKey);
         if (parsed.phase && parsed.phase !== 'admin') setPhase(parsed.phase);
 
         // Verify with server if this session has an active lock
@@ -662,6 +665,19 @@ const BugArena = ({ onAbort }) => {
     } catch { /* ignore */ }
   }, []);
 
+  // Restore the local administrator view after a laptop sleep/reload. Portal
+  // data is always fetched again, so the displayed event state stays current.
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem('ba_admin_session') === 'true') {
+        setIsAdminLoggedIn(true);
+        setPhase('admin');
+        fetchAdminRegistryData();
+      }
+    } catch { /* storage unavailable */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Sync core session state to sessionStorage
   useEffect(() => {
     try {
@@ -675,10 +691,10 @@ const BugArena = ({ onAbort }) => {
         isLocked,
         activeCheatReportId,
         reentryRequested,
-        workspaceUnlocked,
+        submittedKey,
       }));
     } catch { /* ignore */ }
-  }, [teamName, registrationId, isRegistered, isSetup, language, phase, isLocked, activeCheatReportId, reentryRequested]);
+  }, [teamName, registrationId, isRegistered, isSetup, language, phase, isLocked, activeCheatReportId, reentryRequested, submittedKey]);
 
   useEffect(() => {
     let i = 0;
@@ -713,21 +729,37 @@ const BugArena = ({ onAbort }) => {
     };
   }, [regPhase, paymentStatus, registrationId]);
 
-  // Poll Global Event Phase — every 8s to reduce lag
+  // Fetch immediately, then poll. The first update must not wait for an
+  // interval after the admin moves the event to a new phase.
   useEffect(() => {
     if (!isRegistered) return;
-    const intervalId = setInterval(async () => {
+    const syncGlobalPhase = async () => {
       try {
-        const getRes = await fetch(REGISTRY_URL);
-        const registry = await getRes.json();
-        if (registry && registry.globalState && registry.globalState.phase) {
-          setGlobalEventPhase(registry.globalState.phase);
+        const getRes = await fetch(`${SERVER_BASE}/api/event-phase`, { cache: 'no-store' });
+        const eventState = await getRes.json();
+        if (eventState?.phase) {
+          setGlobalEventPhase(eventState.phase);
         }
       } catch (err) {
         // ignore
       }
-    }, 20000); // 20s interval to prevent massive server lag when 100+ students are polling
-    return () => clearInterval(intervalId);
+    };
+    syncGlobalPhase();
+    // EventSource delivers host transitions instantly. The small fallback read
+    // protects the event if a restrictive network blocks SSE.
+    const stream = typeof EventSource !== 'undefined'
+      ? new EventSource(`${SERVER_BASE}/api/event-phase/stream`)
+      : null;
+    if (stream) {
+      stream.addEventListener('phase', (event) => {
+        try {
+          const eventState = JSON.parse(event.data);
+          if (eventState?.phase) setGlobalEventPhase(eventState.phase);
+        } catch { /* ignore malformed event */ }
+      });
+    }
+    const intervalId = setInterval(syncGlobalPhase, 30000);
+    return () => { clearInterval(intervalId); stream?.close(); };
   }, [isRegistered]);
 
   // Auto-submit code if coding phase ends — only fires forward (exchange/hunting/post_event)
@@ -753,7 +785,8 @@ const BugArena = ({ onAbort }) => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [globalEventPhase]);
 
-  // Force sync local tab when admin reverses phases
+  // The host phase is authoritative: players cannot keep editing a previous
+  // phase after an event transition.
   const prevGlobalPhaseRef = React.useRef(globalEventPhase);
   useEffect(() => {
     if (isAdminLoggedIn) return;
@@ -764,11 +797,15 @@ const BugArena = ({ onAbort }) => {
       } else if (globalEventPhase === 'coding') {
         if (!submittedKey) setPhase('create');
       } else if (globalEventPhase === 'exchange') {
-        if (phase === 'hunt') setPhase('exchange');
+        setPhase('exchange');
+      } else if (globalEventPhase === 'hunting') {
+        setPhase(decodedData ? 'hunt' : 'exchange');
+      } else if (globalEventPhase === 'post_event') {
+        setPhase(decodedData ? 'hunt' : 'exchange');
       }
       prevGlobalPhaseRef.current = globalEventPhase;
     }
-  }, [globalEventPhase, submittedKey, isAdminLoggedIn, phase]);
+  }, [globalEventPhase, submittedKey, isAdminLoggedIn, decodedData]);
 
   // Poll lock status when locked — responsive poll (every 2.5s)
   useEffect(() => {
@@ -869,10 +906,6 @@ const BugArena = ({ onAbort }) => {
 
   // Safe cross-browser enter fullscreen
   const enterFullscreenMode = useCallback(async () => {
-    setWorkspaceUnlocked(true);
-    setIsFullscreen(true);
-    try { sessionStorage.setItem('ba_workspace_unlocked', 'true'); } catch {}
-
     const el = document.documentElement;
     const rfs = el.requestFullscreen ||
       el.webkitRequestFullscreen ||
@@ -882,27 +915,21 @@ const BugArena = ({ onAbort }) => {
     if (rfs) {
       try {
         await rfs.call(el);
+        fullscreenStartedRef.current = true;
         setIsFullscreen(true);
         return true;
       } catch (err) {
         console.warn('Native requestFullscreen failed:', err);
-        // Fallback: browser security policy / user gesture blocked native fullscreen
-        setIsFullscreen(true);
-        showToast('Workspace unlocked in windowed mode.', 'info');
+        showToast('Fullscreen could not start. Please allow fullscreen in your browser and try again.', 'error');
         return false;
       }
     } else {
-      // Browser does not support HTML5 Fullscreen (e.g. some mobile/embedded webviews)
-      setIsFullscreen(true);
-      showToast('Fullscreen API unavailable. Workspace unlocked in standard mode.', 'info');
+      showToast('This browser does not support fullscreen mode. Use a supported desktop browser.', 'error');
       return false;
     }
   }, []);
 
   const handleUnlockWorkspace = useCallback(async () => {
-    setWorkspaceUnlocked(true);
-    setIsFullscreen(true);
-    try { sessionStorage.setItem('ba_workspace_unlocked', 'true'); } catch {}
     await enterFullscreenMode();
   }, [enterFullscreenMode]);
 
@@ -910,23 +937,48 @@ const BugArena = ({ onAbort }) => {
   useEffect(() => {
     const onFsChange = () => {
       const isFs = !!getFullscreenElement();
+      if (isFs) fullscreenStartedRef.current = true;
       setIsFullscreen(isFs);
+
+      // Leaving fullscreen during a live contest is treated exactly like
+      // leaving the arena. The final judging phase intentionally releases it.
+      if (!isFs && fullscreenStartedRef.current && globalPhaseRef.current !== 'post_event' &&
+        isSetup && isRegistered && !isAdminLoggedIn && !isLocked) {
+        setIsLocked(true);
+        setCheatWarnings(1);
+        setReentryRequested(false);
+        setToast({ message: '🚨 Fullscreen mode was exited. Your session is locked; request admin re-entry.', type: 'error' });
+        fetch(`${SERVER_BASE}/api/cheat-report`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            teamName: teamName || 'Unknown Team', registrationId, phase,
+            reason: 'LOCKED — Fullscreen mode exited during active contest',
+            warnCount: 1, timestamp: Date.now(), locked: true,
+          }),
+        }).then(res => res.json()).then(data => {
+          if (data.reportId || data._id) setActiveCheatReportId(data.reportId || data._id);
+        }).catch(() => {});
+      }
     };
     const events = ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'];
     events.forEach(evt => document.addEventListener(evt, onFsChange));
     return () => {
       events.forEach(evt => document.removeEventListener(evt, onFsChange));
     };
-  }, [getFullscreenElement]);
+  }, [getFullscreenElement, isSetup, isRegistered, isAdminLoggedIn, isLocked, teamName, registrationId, phase]);
 
-  // Auto-request fullscreen when coding phase starts
+  // The browser requires a deliberate click to enter fullscreen. We do not
+  // provide a windowed bypass for live event phases.
   useEffect(() => {
-    const shouldBeFullscreen = isSetup && isRegistered && !isAdminLoggedIn &&
-      (phase === 'create' || phase === 'hunt') && !isLocked && !workspaceUnlocked;
-    if (shouldBeFullscreen && !isFullscreen) {
-      enterFullscreenMode().catch(() => {});
+    if (globalEventPhase === 'post_event' && getFullscreenElement()) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+      if (exit) {
+        const result = exit.call(document);
+        if (result?.catch) result.catch(() => {});
+      }
     }
-  }, [isSetup, isRegistered, phase, isAdminLoggedIn, isLocked, isFullscreen, workspaceUnlocked, enterFullscreenMode]);
+  }, [globalEventPhase, getFullscreenElement]);
 
   // Register active contest session with server (so mid-contest reload/exit is tracked)
   useEffect(() => {
@@ -946,6 +998,7 @@ const BugArena = ({ onAbort }) => {
 
   useEffect(() => {
     if (!isProctoringActive) return; // Guard: only run during active code phases
+    let violationHandled = false;
 
     const reportCheatToServer = async (reason, warnCount = 1) => {
       try {
@@ -972,7 +1025,10 @@ const BugArena = ({ onAbort }) => {
     };
 
     const handleCheatingAttempt = (reason) => {
-      // Zero tolerance: player gets NO CHANCE and will be locked on the very first violation!
+      if (violationHandled) return;
+      violationHandled = true;
+      // Zero tolerance: lock locally first, then report immediately so the
+      // administrator's SSE alert arrives without waiting for a page refresh.
       setIsLocked(true);
       setCheatWarnings(1);
       setReentryRequested(false);
@@ -998,10 +1054,19 @@ const BugArena = ({ onAbort }) => {
       handleCheatingAttempt('Copy / Paste / Cut operation blocked');
     };
     const handleKeyDown = (e) => {
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'v' || e.key === 'x')) {
+      const key = e.key.toLowerCase();
+      const isClipboardShortcut = (e.ctrlKey || e.metaKey) && ['c', 'v', 'x'].includes(key);
+      const isInspectionShortcut = key === 'f12' ||
+        ((e.ctrlKey || e.metaKey) && e.shiftKey && ['i', 'j', 'c'].includes(key)) ||
+        ((e.ctrlKey || e.metaKey) && ['u', 's', 'p'].includes(key));
+      if (isClipboardShortcut || isInspectionShortcut) {
         e.preventDefault();
-        handleCheatingAttempt('Keyboard shortcut (Ctrl+C/V/X) blocked');
+        handleCheatingAttempt(isInspectionShortcut ? 'Restricted browser/developer shortcut detected' : 'Copy / paste / cut shortcut blocked');
       }
+    };
+    const handleContextMenu = (e) => {
+      e.preventDefault();
+      handleCheatingAttempt('Context menu attempt detected');
     };
 
     const handleBeforeUnload = (e) => {
@@ -1062,6 +1127,7 @@ const BugArena = ({ onAbort }) => {
     document.addEventListener('copy', handleCopyPaste);
     document.addEventListener('paste', handleCopyPaste);
     document.addEventListener('cut', handleCopyPaste);
+    document.addEventListener('contextmenu', handleContextMenu);
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('beforeunload', handleBeforeUnload);
     window.addEventListener('pagehide', handlePageHide);
@@ -1073,6 +1139,7 @@ const BugArena = ({ onAbort }) => {
       document.removeEventListener('copy', handleCopyPaste);
       document.removeEventListener('paste', handleCopyPaste);
       document.removeEventListener('cut', handleCopyPaste);
+      document.removeEventListener('contextmenu', handleContextMenu);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('beforeunload', handleBeforeUnload);
       window.removeEventListener('pagehide', handlePageHide);
@@ -1116,7 +1183,8 @@ const BugArena = ({ onAbort }) => {
     setIsLoadingAdminData(false);
   };
 
-  // Silent auto-refresh for all admin data every 5s (so badges and lists update instantly)
+  // Full dashboard data is comparatively heavy. Keep it as a low-frequency
+  // consistency refresh; instant proctoring alerts use the dedicated SSE feed.
   useEffect(() => {
     if (!isAdminLoggedIn) return;
     const intervalId = setInterval(async () => {
@@ -1149,8 +1217,26 @@ const BugArena = ({ onAbort }) => {
         const cheatData = await cheatRes.json();
         if (Array.isArray(cheatData)) setAdminCheatReports(cheatData);
       } catch (e) { /* silent */ }
-    }, 5000); // 5s interval for admin background sync (one admin won't lag server)
+    }, 20000);
     return () => clearInterval(intervalId);
+  }, [isAdminLoggedIn]);
+
+  useEffect(() => {
+    if (!isAdminLoggedIn || typeof EventSource === 'undefined') return;
+    const stream = new EventSource(`${SERVER_BASE}/api/admin-alerts/stream`);
+    const onAlert = (event) => {
+      try {
+        const alert = JSON.parse(event.data);
+        setAdminCheatReports(prev => {
+          const existing = prev.findIndex(report => report._id === alert.id);
+          const next = { ...alert, _id: alert.id, locked: true, adminUnlocked: false };
+          return existing >= 0 ? prev.map((report, index) => index === existing ? { ...report, ...next } : report) : [next, ...prev];
+        });
+        showToast(`🚨 Immediate proctoring alert: ${alert.teamName} — ${alert.reason}`, 'error');
+      } catch { /* ignore malformed alert */ }
+    };
+    stream.addEventListener('proctoring-alert', onAlert);
+    return () => stream.close();
   }, [isAdminLoggedIn]);
 
   // Admin dismisses / clears a cheat report
@@ -1222,6 +1308,7 @@ const BugArena = ({ onAbort }) => {
   };
 
   const handleAdminLogin = async (username, password) => {
+    setIsAdminAuthenticating(true);
     try {
       const res = await fetch(`${SERVER_BASE}/api/admin/login`, {
         method: 'POST',
@@ -1236,6 +1323,7 @@ const BugArena = ({ onAbort }) => {
         setAdminModalOpen(false);
         setPhase('admin');
         setAdminActiveTab('registrations');
+        try { sessionStorage.setItem('ba_admin_session', 'true'); } catch {}
         fetchAdminRegistryData();
         showToast('Welcome! Portal unlocked.');
       } else {
@@ -1244,22 +1332,22 @@ const BugArena = ({ onAbort }) => {
       }
     } catch {
       showToast('Cannot reach server. Try again.', 'error');
+    } finally {
+      setIsAdminAuthenticating(false);
     }
   };
 
-  // ─── Handle payment screenshot file selection ────────────────────────────
-  const handleScreenshotChange = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    if (file.size > 10 * 1024 * 1024) {
-      setRegError('Screenshot must be under 10MB.');
-      return;
-    }
-    setPaymentScreenshot(file);
-    setRegError('');
-    const reader = new FileReader();
-    reader.onload = (ev) => setPaymentScreenshotPreview(ev.target.result);
-    reader.readAsDataURL(file);
+  const handleAdminLogout = () => {
+    // The admin view is restored only from this session marker after a reload,
+    // so it must be removed on logout as well as updating React state.
+    try { sessionStorage.removeItem('ba_admin_session'); } catch {}
+    setIsAdminLoggedIn(false);
+    setAdminRegistryData(null);
+    setAdminRegistrations([]);
+    setAdminRegStats(null);
+    setAdminCheatReports([]);
+    setPhase('create');
+    showToast('Admin logged out. Login is required to reopen the portal.');
   };
 
   // ─── Handle Registration Submit ──────────────────────────────────────────
@@ -1267,37 +1355,21 @@ const BugArena = ({ onAbort }) => {
     e.preventDefault();
     setRegError('');
 
-    const activeMembers = regTeamType === 'solo'
-      ? [regMembers[0]]
-      : [regMembers[0], regMembers[1]];
+    const activeMembers = [regMembers[0]];
 
     // Client-side validation
     for (const m of activeMembers) {
       if (!m.name.trim()) { setRegError('Please enter all member names.'); return; }
-      if (!m.upiId.trim()) { setRegError('Please enter all UPI IDs.'); return; }
-      if (!/^[a-zA-Z0-9._-]+@[a-zA-Z0-9]+$/.test(m.upiId.trim())) {
-        setRegError(`Invalid UPI ID: "${m.upiId}" — format should be like yourname@bank`); return;
-      }
+      if (!/^\S+@\S+\.\S+$/.test(m.email.trim())) { setRegError('Please enter a valid email address for every member.'); return; }
+      if (!/^[6-9]\d{9}$/.test(m.phone.replace(/\D/g, '').replace(/^91(?=\d{10}$)/, ''))) { setRegError('Please enter a valid 10-digit Indian phone number for every member.'); return; }
     }
-
-    if (!paymentScreenshot) {
-      setRegError('Please upload your payment screenshot.');
-      return;
-    }
-
-    const feeAmount = regTeamType === 'solo' ? 50 : 100;
-
-    const formData = new FormData();
-    formData.append('teamType', regTeamType);
-    formData.append('members', JSON.stringify(activeMembers));
-    formData.append('feeAmount', feeAmount);
-    formData.append('paymentScreenshot', paymentScreenshot);
 
     setIsRegistering(true);
     try {
       const res = await fetch(`${SERVER_BASE}/api/register`, {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ teamType: 'solo', members: activeMembers }),
       });
       const data = await res.json();
 
@@ -1311,7 +1383,7 @@ const BugArena = ({ onAbort }) => {
       // User clicks "Enter the Arena" button which calls setIsRegistered(true).
       setRegistrationId(data.registrationId);
       setRegPhase('done');
-      showToast(`🎉 Registration successful! ID: ${data.registrationId}`);
+      showToast(`🎉 Registration submitted! ID: ${data.registrationId}`);
     } catch (err) {
       setRegError('Could not reach the server. Make sure the backend is running.');
     }
@@ -1337,7 +1409,7 @@ const BugArena = ({ onAbort }) => {
         setAdminRegistrations(prev =>
           prev.map(r => r.registrationId === registrationId ? data.registration : r)
         );
-        showToast(`✅ Registration ${status === 'verified' ? 'Verified' : 'Rejected'}!`);
+        showToast(`✅ Registration ${status === 'verified' ? 'Approved' : 'Rejected'}!`);
         setExpandedReg(null);
         setAdminNoteInput('');
         // refresh stats
@@ -1349,6 +1421,25 @@ const BugArena = ({ onAbort }) => {
       showToast('Server error during verification', 'error');
     }
     setIsVerifying('');
+  };
+
+  const handleExportRegistrations = () => {
+    const escape = value => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const rows = [
+      ['Registration ID', 'Approval status', 'Submitted at', 'Name', 'Email', 'Phone', 'Admin note'],
+      ...adminRegistrations.map(reg => {
+        const members = reg.members || [];
+        return [reg.registrationId, reg.paymentStatus === 'verified' ? 'Approved' : reg.paymentStatus === 'rejected' ? 'Rejected' : 'Pending approval', new Date(reg.submittedAt).toLocaleString('en-IN'), members[0]?.name || '', members[0]?.email || '', members[0]?.phone || '', reg.adminNote || ''];
+      }),
+    ];
+    const blob = new Blob(['\ufeff' + rows.map(row => row.map(escape).join(',')).join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `bug-arena-registrations-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    showToast('Registration CSV downloaded.');
   };
 
   const handleSetup = async (e) => {
@@ -1373,6 +1464,13 @@ const BugArena = ({ onAbort }) => {
         }
       }
     } catch { /* proceed */ }
+    if (registrationId) {
+      fetch(`${SERVER_BASE}/api/arena-profile`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ registrationId, programmingLanguage: language }),
+      }).catch(() => {});
+    }
     setIsSetup(true);
   };
 
@@ -1410,8 +1508,8 @@ const BugArena = ({ onAbort }) => {
   // Uses a stable team-based slot key so re-submissions UPSERT the same entry
   // (admin panel always shows only the LATEST version)
   const handleSubmitCode = async (isAutoSubmit = false) => {
-    if (!isAutoSubmit && !isFullscreen && !workspaceUnlocked) {
-      showToast('Please unlock the coding workspace before submitting!', 'error');
+    if (!isAutoSubmit && !isFullscreen) {
+      showToast('Fullscreen mode is required before submitting.', 'error');
       return;
     }
     if (!code.trim()) {
@@ -1455,21 +1553,20 @@ const BugArena = ({ onAbort }) => {
       console.warn('LocalStorage warning:', e);
     }
 
-    // 2. Sync to online registry — UPSERT under same key, removing old key if team changed
+    // 2. Atomic server-side upsert: concurrent teams cannot overwrite each
+    // other's submissions during the final-minute rush.
     try {
-      const getRes = await fetch(REGISTRY_URL);
-      const registry = (await getRes.json()) || {};
-
-      // Write/overwrite with the SAME key — this replaces any previous submission in-place
-      registry[key] = payload;
-
-      await fetch(REGISTRY_URL, {
-        method: 'PUT',
+      const response = await fetch(`${SERVER_BASE}/api/submissions`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(registry),
+        body: JSON.stringify(payload),
       });
+      if (!response.ok) throw new Error('Submission save failed');
     } catch (err) {
       console.warn('Cloud registry sync error:', err);
+      setIsSubmitting(false);
+      showToast('Could not save your code. Please try submitting again.', 'error');
+      return;
     }
 
     if (registrationId) {
@@ -1577,10 +1674,10 @@ const BugArena = ({ onAbort }) => {
   };
 
   // ── Generate bug report ──
-  const handleGenerateReport = async () => {
+  const handleGenerateReport = async (isAutoSubmit = false) => {
     const validFound = foundBugs.filter(b => b.description.trim());
     if (validFound.length === 0) {
-      showToast('Describe at least one bug you found!', 'error');
+      showToast(isAutoSubmit ? 'Hunting ended with no completed bug report to submit.' : 'Describe at least one bug you found!', isAutoSubmit ? 'info' : 'error');
       return;
     }
 
@@ -1624,18 +1721,16 @@ const BugArena = ({ onAbort }) => {
     };
 
     try {
-      const getRes = await fetch(REGISTRY_URL);
-      const registry = (await getRes.json()) || {};
-      const reports = registry.reports || [];
-      reports.push(reportPayload);
-      registry.reports = reports;
-      await fetch(REGISTRY_URL, {
-        method: 'PUT',
+      const response = await fetch(`${SERVER_BASE}/api/reports`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(registry),
+        body: JSON.stringify(reportPayload),
       });
+      if (!response.ok) throw new Error('Report save failed');
     } catch (e) {
       console.warn('Cloud report sync error:', e);
+      showToast('Could not save your bug report. Please try again.', 'error');
+      return;
     }
 
     // BUG FIX: clipboard write is blocked by proctoring copy listener.
@@ -1959,7 +2054,9 @@ const BugArena = ({ onAbort }) => {
           matchedH.add(cand.hIdx);
           matchedC.add(cand.cIdx);
 
-          const status = userOverride || (cand.confidence >= 65 ? 'CONFIRMED' : 'PROBABLE');
+          // Confidence is a suggestion, never a verification. Only an admin
+          // override can turn a row into a scoring decision.
+          const status = userOverride || 'suggested';
           pairs.push({
             ...cand,
             status,
@@ -1977,7 +2074,9 @@ const BugArena = ({ onAbort }) => {
         return {
           hBug,
           hIdx,
-          status: overrides[overrideKey] || 'UNMATCHED_FALSE',
+          // An unmatched claim requires human review; it is not automatically
+          // false or penalty-worthy.
+          status: overrides[overrideKey] || 'suggested',
           userOverridden: !!overrides[overrideKey],
         };
       });
@@ -1992,7 +2091,7 @@ const BugArena = ({ onAbort }) => {
     let acceptedBonusCount = 0;
 
     pairs.forEach(p => {
-      if (p.status === 'CONFIRMED' || p.status === 'PROBABLE') {
+      if (p.status === 'confirmed') {
         verifiedCount++;
         if (p.hBug.fix && p.hBug.fix.trim().length > 5) hunterBonusCount++;
       } else if (p.status === 'rejected') {
@@ -2003,7 +2102,7 @@ const BugArena = ({ onAbort }) => {
     unmatchedHunterBugs.forEach(u => {
       if (u.status === 'bonus') {
         acceptedBonusCount++;
-      } else if (u.status !== 'rejected') {
+      } else if (u.status === 'rejected') {
         falsePositiveCount++;
       }
     });
@@ -2061,7 +2160,7 @@ const BugArena = ({ onAbort }) => {
       creatorScore,
       recommendedWinner,
       recommendationReason,
-      status: verifiedCount > 0 ? (verifiedCount === creatorBugs.length ? 'PERFECT' : 'PARTIAL') : 'MISMATCH',
+      status: verifiedCount > 0 ? (verifiedCount === creatorBugs.length ? 'PERFECT' : 'PARTIAL') : 'PENDING_REVIEW',
     };
   };
 
@@ -2094,10 +2193,7 @@ const BugArena = ({ onAbort }) => {
   // ── Admin Decision & Bug Override Handlers ──
   const handleSaveAdminDecision = async (reportId, winner, details = {}) => {
     try {
-      const getRes = await fetch(REGISTRY_URL);
-      const registry = (await getRes.json()) || {};
-      const verifications = registry.verifications || {};
-      verifications[reportId] = {
+      const decision = {
         winner,
         reason: details.reason || '',
         hunterScore: details.hunterScore || 0,
@@ -2106,15 +2202,16 @@ const BugArena = ({ onAbort }) => {
         overrides: bugOverrides[reportId] || {},
         decidedAt: Date.now(),
       };
-      registry.verifications = verifications;
-
-      await fetch(REGISTRY_URL, {
-        method: 'PUT',
+      const response = await fetch(`${SERVER_BASE}/api/verifications/${encodeURIComponent(reportId)}`, {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(registry),
+        body: JSON.stringify(decision),
       });
-
-      setAdminRegistryData(registry);
+      if (!response.ok) throw new Error('Decision save failed');
+      setAdminRegistryData(prev => ({
+        ...(prev || {}),
+        verifications: { ...(prev?.verifications || {}), [reportId]: decision },
+      }));
       showToast(`🏆 Decision Saved: Winner is "${winner}"!`, 'success');
     } catch (e) {
       showToast('Could not save verdict — network error', 'error');
@@ -2133,14 +2230,11 @@ const BugArena = ({ onAbort }) => {
     });
   };
 
-  // ── Workload Reduction: Batch Auto-Verify Engine ──
+  // ── Workload Reduction: suggestions only ───────────────────────────────
+  // A heuristic can highlight evidence, but it must not award points or save a
+  // winner. The administrator makes the final decision after reviewing rows.
   const handleBatchAutoVerify = async (targetLang = 'all') => {
     try {
-      const getRes = await fetch(REGISTRY_URL);
-      const registry = (await getRes.json()) || {};
-      const verifications = { ...(registry.verifications || {}) };
-      const newOverrides = { ...bugOverrides };
-
       const targetReports = reportsList.filter(r => {
         if (targetLang === 'all') return true;
         const lang = (r.language || '').toLowerCase() || 'python';
@@ -2152,92 +2246,14 @@ const BugArena = ({ onAbort }) => {
         return;
       }
 
-      let count = 0;
-      targetReports.forEach(r => {
+      const suggestedCount = targetReports.reduce((count, r) => {
         const creatorData = teamEntries.find(t => t.team === r.originalTeam || t.key === r.key);
-        const analysis = computeDeepBugAnalysis(r, creatorData, newOverrides[r.id] || {});
-
-        const reportOverrides = { ...(newOverrides[r.id] || {}) };
-        analysis.pairs.forEach(p => {
-          const overrideKey = `${r.id}_h${p.hBug.id || p.hIdx}`;
-          if (!reportOverrides[overrideKey] && p.confidence >= 60) {
-            reportOverrides[overrideKey] = 'confirmed';
-          }
-        });
-        newOverrides[r.id] = reportOverrides;
-
-        if (!verifications[r.id] && analysis.recommendedWinner && analysis.recommendedWinner !== 'None') {
-          verifications[r.id] = {
-            winner: analysis.recommendedWinner,
-            reason: analysis.recommendationReason,
-            hunterScore: analysis.hunterScore,
-            creatorScore: analysis.creatorScore,
-            verifiedCount: analysis.verifiedCount,
-            overrides: reportOverrides,
-            decidedAt: Date.now(),
-          };
-          count++;
-        }
-      });
-
-      registry.verifications = verifications;
-      await fetch(REGISTRY_URL, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(registry),
-      });
-
-      setBugOverrides(newOverrides);
-      setAdminRegistryData(registry);
-      showToast(`⚡ Batch verified & decided ${count} matches based on Multi-Probability Evidence!`, 'success');
+        const analysis = computeDeepBugAnalysis(r, creatorData, bugOverrides[r.id] || {});
+        return count + analysis.pairs.filter(p => p.confidence >= 75).length;
+      }, 0);
+      showToast(`Review aid found ${suggestedCount} high-confidence alignments. No points, claims, or winners were changed.`, 'info');
     } catch (e) {
       showToast('Batch auto-verification failed: ' + e.message, 'error');
-    }
-  };
-
-  const handleBatchApplyAiVerdicts = async (targetLang = 'all') => {
-    try {
-      const getRes = await fetch(REGISTRY_URL);
-      const registry = (await getRes.json()) || {};
-      const verifications = { ...(registry.verifications || {}) };
-
-      const targetReports = reportsList.filter(r => {
-        if (targetLang === 'all') return true;
-        const lang = (r.language || '').toLowerCase() || 'python';
-        return lang === targetLang.toLowerCase();
-      });
-
-      let updatedCount = 0;
-      targetReports.forEach(r => {
-        if (!verifications[r.id]) {
-          const creatorData = teamEntries.find(t => t.team === r.originalTeam || t.key === r.key);
-          const analysis = computeDeepBugAnalysis(r, creatorData, bugOverrides[r.id] || {});
-          if (analysis.recommendedWinner && analysis.recommendedWinner !== 'None') {
-            verifications[r.id] = {
-              winner: analysis.recommendedWinner,
-              reason: analysis.recommendationReason,
-              hunterScore: analysis.hunterScore,
-              creatorScore: analysis.creatorScore,
-              verifiedCount: analysis.verifiedCount,
-              overrides: bugOverrides[r.id] || {},
-              decidedAt: Date.now(),
-            };
-            updatedCount++;
-          }
-        }
-      });
-
-      registry.verifications = verifications;
-      await fetch(REGISTRY_URL, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(registry),
-      });
-
-      setAdminRegistryData(registry);
-      showToast(`🎯 Auto-applied AI recommended winners for ${updatedCount} matches!`, 'success');
-    } catch (e) {
-      showToast('Could not apply AI decisions: ' + e.message, 'error');
     }
   };
 
@@ -2278,7 +2294,7 @@ const BugArena = ({ onAbort }) => {
       .catch(() => showToast('Could not copy automatically — check console', 'error'));
   };
 
-  // ─── Render Registration / Payment Form ─────────────────────────────────
+  // ─── Render Registration / Organizer Approval Form ──────────────────────
   const handleEventDayLogin = async (e) => {
     e.preventDefault();
     if (!loginRegId.trim()) {
@@ -2296,8 +2312,10 @@ const BugArena = ({ onAbort }) => {
       if (data.success) {
         setRegistrationId(data.registrationId);
         setIsRegistered(true);
+        if (data.programmingLanguage && LANGUAGES.some(lang => lang.id === data.programmingLanguage)) {
+          setLanguage(data.programmingLanguage);
+        }
         // Pre-fill team details for setup phase
-        setRegTeamType(data.teamType);
         const memberNames = data.members.map(m => m.name).join(' & ');
         setTeamName(memberNames);
         if (data.isLocked) {
@@ -2320,8 +2338,6 @@ const BugArena = ({ onAbort }) => {
   };
 
   const renderRegistrationForm = () => {
-    const feeAmount = regTeamType === 'solo' ? 50 : 100;
-
     if (eventDayMode) {
       return (
         <div className="ba-fade-in" style={{ maxWidth: '440px', margin: '4rem auto' }}>
@@ -2360,7 +2376,7 @@ const BugArena = ({ onAbort }) => {
                   onClick={() => setEventDayMode(false)} 
                   style={{ background: 'none', border: 'none', color: '#6b6b8a', fontSize: '0.85rem', cursor: 'pointer', textDecoration: 'underline' }}
                 >
-                  Need to register and pay instead?
+                  Need to register instead?
                 </button>
               </div>
             </form>
@@ -2374,14 +2390,14 @@ const BugArena = ({ onAbort }) => {
         <div className="ba-fade-in" style={{ textAlign: 'center', padding: '3rem 1rem', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1.5rem' }}>
           <div style={{ fontSize: '4rem' }}>{paymentStatus === 'verified' ? '🎉' : paymentStatus === 'rejected' ? '❌' : '⏳'}</div>
           <h2 style={{ fontFamily: 'Space Grotesk, sans-serif', fontSize: 'clamp(1.4rem, 4vw, 2rem)', fontWeight: 900, background: paymentStatus === 'verified' ? 'linear-gradient(135deg, #4ade80 0%, #00ffff 60%, #9d4edd 100%)' : paymentStatus === 'rejected' ? 'linear-gradient(135deg, #ff5f56 0%, #ff0000 100%)' : 'linear-gradient(135deg, #fbbf24 0%, #d97706 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text', margin: 0 }}>
-            {paymentStatus === 'verified' ? 'PAYMENT VERIFIED!' : paymentStatus === 'rejected' ? 'PAYMENT REJECTED' : 'REGISTRATION SUBMITTED!'}
+            {paymentStatus === 'verified' ? 'REGISTRATION APPROVED!' : paymentStatus === 'rejected' ? 'REGISTRATION REJECTED' : 'REGISTRATION SUBMITTED!'}
           </h2>
           <p style={{ color: '#a0a0c5', fontSize: '0.95rem', maxWidth: '440px', lineHeight: 1.7 }}>
             {paymentStatus === 'verified' 
-              ? 'Your slot is confirmed! You may now enter the arena.'
+              ? 'Your registration is approved! You may now enter the arena.'
               : paymentStatus === 'rejected'
-              ? 'Your payment screenshot was rejected by the admin. Please try registering again.'
-              : 'Your registration is under review. The admin will verify your payment and confirm your slot. Keep your Registration ID safe!'}
+              ? 'Your registration was rejected by the organizer. Please register again with corrected details.'
+              : 'Your registration is under review. The organizer will approve your slot. Keep your Registration ID safe!'}
           </p>
           <div className="ba-reg-id-box">
             <span style={{ fontSize: '0.72rem', color: '#7a7a9e', textTransform: 'uppercase', letterSpacing: '0.1em', fontFamily: 'Space Grotesk, sans-serif' }}>Your Registration ID</span>
@@ -2402,7 +2418,7 @@ const BugArena = ({ onAbort }) => {
             </button>
           </div>
           <div style={{ background: paymentStatus === 'verified' ? 'rgba(74, 222, 128, 0.06)' : paymentStatus === 'rejected' ? 'rgba(255, 95, 86, 0.06)' : 'rgba(251, 191, 36, 0.06)', border: `1px solid ${paymentStatus === 'verified' ? 'rgba(74, 222, 128, 0.2)' : paymentStatus === 'rejected' ? 'rgba(255, 95, 86, 0.2)' : 'rgba(251, 191, 36, 0.2)'}`, borderRadius: '12px', padding: '1rem 1.5rem', fontSize: '0.83rem', color: '#7a7a9e', maxWidth: '420px', textAlign: 'left', lineHeight: 1.7 }}>
-            <strong style={{ color: paymentStatus === 'verified' ? '#4ade80' : paymentStatus === 'rejected' ? '#ff5f56' : '#fbbf24' }}>⚠️ Note:</strong> Your slot is confirmed only after admin verifies the payment screenshot. Status: <span style={{ color: paymentStatus === 'verified' ? '#4ade80' : paymentStatus === 'rejected' ? '#ff5f56' : '#fbbf24', fontWeight: 'bold' }}>{paymentStatus.toUpperCase()}</span>
+            <strong style={{ color: paymentStatus === 'verified' ? '#4ade80' : paymentStatus === 'rejected' ? '#ff5f56' : '#fbbf24' }}>⚠️ Note:</strong> Your slot is confirmed only after organizer approval. Status: <span style={{ color: paymentStatus === 'verified' ? '#4ade80' : paymentStatus === 'rejected' ? '#ff5f56' : '#fbbf24', fontWeight: 'bold' }}>{paymentStatus === 'verified' ? 'APPROVED' : paymentStatus === 'rejected' ? 'REJECTED' : 'PENDING APPROVAL'}</span>
           </div>
         </div>
       );
@@ -2412,7 +2428,7 @@ const BugArena = ({ onAbort }) => {
       <div className="ba-fade-in">
         <div className="ba-section-header" style={{ position: 'relative' }}>
           <div className="ba-section-line" />
-          <h2 className="ba-section-title">💳 Register & Pay Entry Fee</h2>
+          <h2 className="ba-section-title">📝 Event Registration</h2>
           <div className="ba-section-line" />
           <button 
             className="ba-neon-btn ba-btn-sm" 
@@ -2423,52 +2439,10 @@ const BugArena = ({ onAbort }) => {
           </button>
         </div>
         <p className="ba-section-desc">
-          Register your team and pay the entry fee to participate in Bug Arena. Scan the QR code below to pay via UPI.
+          Register your details for free. Your organizer-approved Registration ID will be used to enter the arena on event day.
         </p>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '1.5rem', width: '100%', maxWidth: '900px', margin: '0 auto' }}>
-
-          {/* Left: Payment QR Code */}
-          <div className="ba-reg-qr-card">
-            <div className="ba-reg-qr-header">
-              <span>📱 Scan to Pay</span>
-            </div>
-            <div className="ba-reg-qr-body">
-              <div className="ba-reg-qr-wrap">
-                <img src="/bugarena_qr.png?v=3" alt="Bug Arena Payment QR Code" className="ba-reg-qr-img" />
-                <div className="ba-reg-qr-glow" />
-              </div>
-              <div className="ba-reg-fee-badge">
-                <span className="ba-reg-fee-label">Entry Fee</span>
-                <span className="ba-reg-fee-amount">₹{feeAmount}</span>
-                <span className="ba-reg-fee-note">
-                  {regTeamType === 'solo' ? '₹50 × 1 person' : '₹50 × 2 persons'}
-                </span>
-              </div>
-              <div className="ba-reg-upi-section">
-                <div className="ba-reg-upi-label">💳 Pay to UPI ID / QR:</div>
-                <div className="ba-reg-upi-list">
-                  <div
-                    className="ba-reg-upi-item"
-                    style={{ cursor: 'pointer' }}
-                    onClick={() => {
-                      navigator.clipboard?.writeText('ashraydwivedi2@oksbi');
-                      showToast('Copied UPI ID: ashraydwivedi2@oksbi');
-                    }}
-                    title="Click to copy UPI ID"
-                  >
-                    <span className="ba-reg-upi-name">Event Coordinator</span>
-                    <span className="ba-reg-upi-id">ashraydwivedi2@oksbi 📋</span>
-                  </div>
-                </div>
-              </div>
-              <div style={{ fontSize: '0.76rem', color: '#6b6b8a', textAlign: 'center', marginTop: '0.5rem' }}>
-                After payment, fill the form →  and upload your screenshot
-              </div>
-            </div>
-          </div>
-
-          {/* Right: Registration Form */}
+        <div style={{ width: '100%', maxWidth: '700px', margin: '0 auto' }}>
           <div className="ba-setup-card" style={{ maxWidth: '100%', margin: 0 }}>
             <div className="ba-setup-header">
               <div className="ba-setup-dots">
@@ -2480,32 +2454,11 @@ const BugArena = ({ onAbort }) => {
             </div>
 
             <form className="ba-setup-body" onSubmit={handleRegisterSubmit} style={{ gap: '1.2rem' }}>
-              {/* Team Type Toggle */}
-              <div className="ba-field-group">
-                <label className="ba-field-label"><span>👥</span> Participation Type</label>
-                <div className="ba-team-type-toggle">
-                  <button
-                    type="button"
-                    className={`ba-type-btn ${regTeamType === 'solo' ? 'ba-type-btn-active' : ''}`}
-                    onClick={() => setRegTeamType('solo')}
-                  >
-                    👤 Solo<br /><small>₹50 fee</small>
-                  </button>
-                  <button
-                    type="button"
-                    className={`ba-type-btn ${regTeamType === 'duo' ? 'ba-type-btn-active' : ''}`}
-                    onClick={() => setRegTeamType('duo')}
-                  >
-                    👥 Duo (Team of 2)<br /><small>₹100 fee</small>
-                  </button>
-                </div>
-              </div>
-
               {/* Member 1 */}
               <div className="ba-member-block">
                 <div className="ba-member-label">
                   <span className="ba-member-icon">👤</span>
-                  {regTeamType === 'duo' ? 'Member 1 (Team Leader)' : 'Your Details'}
+                  Your Details
                 </div>
                 <div className="ba-field-group">
                   <label className="ba-field-label"><span>🏷️</span> Full Name</label>
@@ -2520,19 +2473,7 @@ const BugArena = ({ onAbort }) => {
                   />
                 </div>
                 <div className="ba-field-group" style={{ marginTop: '0.6rem' }}>
-                  <label className="ba-field-label"><span>💳</span> UPI ID (for payment verification)</label>
-                  <input
-                    type="text"
-                    className="ba-field-input"
-                    value={regMembers[0].upiId}
-                    onChange={e => updateRegMember(0, 'upiId', e.target.value)}
-                    placeholder="e.g. yourname@paytm"
-                    maxLength={80}
-                    required
-                  />
-                </div>
-                <div className="ba-field-group" style={{ marginTop: '0.6rem' }}>
-                  <label className="ba-field-label"><span>📧</span> Email (optional)</label>
+                  <label className="ba-field-label"><span>📧</span> Email Address</label>
                   <input
                     type="email"
                     className="ba-field-input"
@@ -2540,82 +2481,22 @@ const BugArena = ({ onAbort }) => {
                     onChange={e => updateRegMember(0, 'email', e.target.value)}
                     placeholder="email@example.com"
                     maxLength={100}
+                    required
                   />
                 </div>
-              </div>
-
-              {/* Member 2 (duo only) */}
-              {regTeamType === 'duo' && (
-                <div className="ba-member-block ba-member-block-2 ba-fade-in">
-                  <div className="ba-member-label" style={{ color: '#9d4edd' }}>
-                    <span className="ba-member-icon" style={{ color: '#9d4edd' }}>👤</span>
-                    Member 2
-                  </div>
-                  <div className="ba-field-group">
-                    <label className="ba-field-label" style={{ color: '#9d4edd' }}><span>🏷️</span> Full Name</label>
-                    <input
-                      type="text"
-                      className="ba-field-input"
-                      value={regMembers[1].name}
-                      onChange={e => updateRegMember(1, 'name', e.target.value)}
-                      placeholder="Enter full name..."
-                      maxLength={60}
-                      required
-                    />
-                  </div>
-                  <div className="ba-field-group" style={{ marginTop: '0.6rem' }}>
-                    <label className="ba-field-label" style={{ color: '#9d4edd' }}><span>💳</span> UPI ID (for payment verification)</label>
-                    <input
-                      type="text"
-                      className="ba-field-input"
-                      value={regMembers[1].upiId}
-                      onChange={e => updateRegMember(1, 'upiId', e.target.value)}
-                      placeholder="e.g. member2@gpay"
-                      maxLength={80}
-                      required
-                    />
-                  </div>
-                  <div className="ba-field-group" style={{ marginTop: '0.6rem' }}>
-                    <label className="ba-field-label" style={{ color: '#9d4edd' }}><span>📧</span> Email (optional)</label>
-                    <input
-                      type="email"
-                      className="ba-field-input"
-                      value={regMembers[1].email}
-                      onChange={e => updateRegMember(1, 'email', e.target.value)}
-                      placeholder="email@example.com"
-                      maxLength={100}
-                    />
-                  </div>
+                <div className="ba-field-group" style={{ marginTop: '0.6rem' }}>
+                  <label className="ba-field-label"><span>📱</span> Phone Number</label>
+                  <input
+                    type="tel"
+                    className="ba-field-input"
+                    value={regMembers[0].phone}
+                    onChange={e => updateRegMember(0, 'phone', e.target.value)}
+                    placeholder="10-digit mobile number"
+                    inputMode="numeric"
+                    maxLength={13}
+                    required
+                  />
                 </div>
-              )}
-
-              {/* Screenshot Upload */}
-              <div className="ba-field-group">
-                <label className="ba-field-label"><span>📸</span> Payment Screenshot</label>
-                <div className="ba-screenshot-upload-zone" onClick={() => document.getElementById('screenshotInput').click()}>
-                  {paymentScreenshotPreview ? (
-                    <div style={{ position: 'relative' }}>
-                      <img src={paymentScreenshotPreview} alt="Payment screenshot preview" className="ba-screenshot-preview" />
-                      <div className="ba-screenshot-overlay">
-                        <span>🔄 Click to change</span>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="ba-upload-placeholder">
-                      <div style={{ fontSize: '2.5rem' }}>📤</div>
-                      <div style={{ fontFamily: 'Space Grotesk, sans-serif', fontWeight: 700, color: '#c0c0e0', fontSize: '0.9rem' }}>Click to upload payment screenshot</div>
-                      <div style={{ fontSize: '0.75rem', color: '#7a7a9e', marginTop: '0.3rem' }}>JPG, PNG or WebP · Max 10MB</div>
-                      <div style={{ fontSize: '0.72rem', color: '#ff6b6b', marginTop: '0.4rem' }}>⚠️ Must be YOUR own payment screenshot</div>
-                    </div>
-                  )}
-                </div>
-                <input
-                  id="screenshotInput"
-                  type="file"
-                  accept="image/jpeg,image/jpg,image/png,image/webp"
-                  onChange={handleScreenshotChange}
-                  style={{ display: 'none' }}
-                />
               </div>
 
               {/* Error message */}
@@ -2624,13 +2505,6 @@ const BugArena = ({ onAbort }) => {
                   <span>⚠️</span> {regError}
                 </div>
               )}
-
-              {/* Fee Summary */}
-              <div className="ba-fee-summary">
-                <span>💰 Total Fee:</span>
-                <span className="ba-fee-total">₹{feeAmount}</span>
-                <span style={{ color: '#7a7a9e', fontSize: '0.8rem' }}>({regTeamType === 'solo' ? '1 person' : '2 persons'} × ₹50)</span>
-              </div>
 
               <button
                 type="submit"
@@ -2643,7 +2517,7 @@ const BugArena = ({ onAbort }) => {
               </button>
 
               <p style={{ textAlign: 'center', color: '#6b6b8a', fontSize: '0.76rem', margin: 0 }}>
-                🔒 Your screenshot hash is stored to prevent duplicate submissions. Each UPI ID can only register once.
+                🔒 Registration is free. Email addresses and phone numbers are used only to prevent duplicate entries and manage attendance.
               </p>
             </form>
           </div>
@@ -2772,7 +2646,7 @@ const BugArena = ({ onAbort }) => {
             </div>
           </div>
         </div>
-      ) : (!isFullscreen && !workspaceUnlocked) ? (
+      ) : (!isFullscreen) ? (
         /* Fullscreen Hard Lock: The entire writing & submission workspace is locked */
         <div className="ba-fade-in" style={{
           display: 'flex',
@@ -2808,7 +2682,7 @@ const BugArena = ({ onAbort }) => {
             </div>
             <p style={{ color: '#a0a0c5', fontSize: '0.92rem', maxWidth: '480px', margin: '0.6rem auto 0', lineHeight: 1.6 }}>
               Writing, editing, and submitting buggy code is locked until you enter Fullscreen mode.
-              This prevents cheating, tab-switching, and unauthorized assistance during the event.
+              You must remain in fullscreen until the host starts final judging.
             </p>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.75rem', marginTop: '0.4rem' }}>
@@ -2819,30 +2693,6 @@ const BugArena = ({ onAbort }) => {
             >
               <span style={{ fontSize: '1.2rem' }}>⛶</span>
               <span>Enter Fullscreen Mode to Unlock</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setWorkspaceUnlocked(true);
-                setIsFullscreen(true);
-                try { sessionStorage.setItem('ba_workspace_unlocked', 'true'); } catch {}
-                showToast('Workspace unlocked in windowed mode. Please keep the contest tab active!', 'info');
-              }}
-              style={{
-                background: 'transparent',
-                border: '1px solid rgba(251, 191, 36, 0.25)',
-                borderRadius: '8px',
-                color: '#fbbf24',
-                padding: '0.35rem 0.9rem',
-                fontSize: '0.76rem',
-                cursor: 'pointer',
-                opacity: 0.85,
-                transition: 'all 0.2s ease',
-              }}
-              onMouseEnter={e => e.currentTarget.style.opacity = '1'}
-              onMouseLeave={e => e.currentTarget.style.opacity = '0.85'}
-            >
-              ⚠️ Browser not entering fullscreen? Click here to unlock directly
             </button>
           </div>
         </div>
@@ -2924,11 +2774,11 @@ const BugArena = ({ onAbort }) => {
             <button
               className="ba-neon-btn ba-btn-yellow"
               onClick={handleSubmitCode}
-              disabled={!code.trim() || createdBugs.filter(b => b.description.trim()).length === 0 || isSubmitting || (!isFullscreen && !workspaceUnlocked)}
-              title={(!isFullscreen && !workspaceUnlocked) ? 'Enter fullscreen or unlock workspace to submit your code' : ''}
+              disabled={!code.trim() || createdBugs.filter(b => b.description.trim()).length === 0 || isSubmitting || !isFullscreen}
+              title={!isFullscreen ? 'Fullscreen mode is required to submit your code' : ''}
             >
               <span className="ba-btn-icon">⚡</span>
-              {isSubmitting ? 'Submitting & Encrypting...' : (!isFullscreen && !workspaceUnlocked) ? '🔒 Fullscreen Required to Submit' : 'Submit Bug Code'}
+              {isSubmitting ? 'Submitting & Encrypting...' : !isFullscreen ? '🔒 Fullscreen Required to Submit' : 'Submit Bug Code'}
             </button>
             <button
               className="ba-neon-btn ba-btn-cyan"
@@ -3131,10 +2981,9 @@ const BugArena = ({ onAbort }) => {
             </div>
 
             <div className="ba-thankyou-emoji">🏆</div>
-            <h2 className="ba-thankyou-title">THANK YOU FOR PARTICIPATION!</h2>
+            <h2 className="ba-thankyou-title">Report submitted</h2>
             <p className="ba-thankyou-sub">
-              Your bug report has been submitted and synced to the Admin Portal.
-              Await the final results from the event organisers.
+              Your report is safely synced to the admin review queue. You can now wait for the event results.
             </p>
             <div className="ba-thankyou-badge">✓ Submission Locked</div>
           </div>
@@ -3346,22 +3195,15 @@ const BugArena = ({ onAbort }) => {
     }
 
     try {
-      const getRes = await fetch(REGISTRY_URL);
-      const registry = await getRes.json();
-      if (!registry.globalState) registry.globalState = {};
-      registry.globalState.phase = newPhase;
-      registry.globalState.lastChanged = Date.now();
-      registry.globalState.history = [
-        ...(registry.globalState.history || []).slice(-9), // keep last 10 transitions
-        { from: currentPhase, to: newPhase, at: new Date().toISOString() },
-      ];
-      await fetch(REGISTRY_URL, {
-        method: 'PUT',
+      const response = await fetch(`${SERVER_BASE}/api/event-phase`, {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(registry),
+        body: JSON.stringify({ phase: newPhase }),
       });
+      if (!response.ok) throw new Error('Phase update rejected');
+      const data = await response.json();
+      setAdminRegistryData(prev => ({ ...(prev || {}), globalState: data.globalState }));
       setGlobalEventPhase(newPhase); // update local admin view immediately
-      fetchAdminRegistryData();
       const dir = isGoingBack ? '← Reversed' : '→ Advanced';
       showToast(`${dir} — Phase: ${PHASE_LABELS[newPhase].label}`);
     } catch (e) {
@@ -3372,12 +3214,23 @@ const BugArena = ({ onAbort }) => {
   const renderAdminDashboard = () => {
     const rawData = adminRegistryData || {};
     // Extract registered teams (keys that are 6-chars)
-    const teamEntries = Object.entries(rawData)
-      .filter(([k, v]) => k !== 'reports' && k !== 'globalState' && v && typeof v === 'object' && v.code)
+    const latestTeamEntries = Object.entries(rawData)
+      .filter(([k, v]) => k !== 'reports' && k !== 'globalState' && k !== 'verifications' && v && typeof v === 'object' && v.code)
       .map(([k, v]) => ({ key: k, ...v }));
+    // Defensive display de-duplication for records saved by older app versions.
+    // The server already replaces a participant's earlier record; this keeps
+    // the review view clean if legacy duplicate keys exist in MongoDB.
+    const byParticipant = new Map();
+    latestTeamEntries.forEach(entry => {
+      const identity = entry.registrationId || String(entry.team || entry.key).trim().toLowerCase();
+      const previous = byParticipant.get(identity);
+      if (!previous || Number(entry.updatedAt || entry.timestamp || 0) >= Number(previous.updatedAt || previous.timestamp || 0)) {
+        byParticipant.set(identity, entry);
+      }
+    });
+    const teamEntries = [...byParticipant.values()];
 
     const reportsList = rawData.reports || [];
-    const serverBase = REGISTRY_URL.replace('/api/registry', '');
 
     const statusColor = (s) => s === 'verified' ? '#4ade80' : s === 'rejected' ? '#ff5f56' : '#fbbf24';
     const statusBg = (s) => s === 'verified' ? 'rgba(74,222,128,0.1)' : s === 'rejected' ? 'rgba(255,95,86,0.1)' : 'rgba(251,191,36,0.1)';
@@ -3523,11 +3376,7 @@ const BugArena = ({ onAbort }) => {
             </button>
             <button
               className="ba-neon-btn ba-btn-sm"
-              onClick={() => {
-                setIsAdminLoggedIn(false);
-                setPhase('create');
-                showToast('Admin logged out.');
-              }}
+              onClick={handleAdminLogout}
               style={{ background: 'rgba(255, 95, 86, 0.1)', borderColor: 'rgba(255, 95, 86, 0.4)', color: '#ff5f56' }}
             >
               🚪 Logout
@@ -3542,7 +3391,7 @@ const BugArena = ({ onAbort }) => {
             onClick={() => setAdminActiveTab('registrations')}
             style={{ color: adminActiveTab === 'registrations' ? '#4ade80' : '#6b6b8a' }}
           >
-            <span>💳 Registrations & Payments ({adminRegistrations.length})</span>
+            <span>🧾 Registrations & Approvals ({adminRegistrations.length})</span>
           </button>
           <div className="ba-phase-connector" />
           <button
@@ -3583,11 +3432,12 @@ const BugArena = ({ onAbort }) => {
           </button>
         </div>
 
-        {/* TAB 0: Registrations & Payment Verification */}
+        {/* TAB 0: Registrations & Organizer Approval */}
         {adminActiveTab === 'registrations' && (
           <div className="ba-admin-dashboard ba-fade-in">
             <div className="ba-admin-header">
-              <div className="ba-admin-header-title">💳 Registrations & Payment Verification ({adminRegistrations.length})</div>
+              <div className="ba-admin-header-title">🧾 Registration Approvals ({adminRegistrations.length})</div>
+              <button className="ba-neon-btn ba-btn-sm" onClick={handleExportRegistrations} disabled={adminRegistrations.length === 0} style={{ background: 'rgba(0,255,255,0.08)', borderColor: 'rgba(0,255,255,0.35)', color: '#00ffff' }}>⬇ Export CSV</button>
             </div>
 
             {/* Stats Bar */}
@@ -3595,11 +3445,10 @@ const BugArena = ({ onAbort }) => {
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '1rem', padding: '1.5rem 1.5rem 0' }}>
                 {[
                   { label: 'Total', value: adminRegStats.total, color: '#00ffff', icon: '📋' },
-                  { label: 'Pending', value: adminRegStats.pending, color: '#fbbf24', icon: '⏳' },
-                  { label: 'Verified', value: adminRegStats.verified, color: '#4ade80', icon: '✅' },
+                  { label: 'Pending approval', value: adminRegStats.pending, color: '#fbbf24', icon: '⏳' },
+                  { label: 'Approved', value: adminRegStats.verified, color: '#4ade80', icon: '✅' },
                   { label: 'Rejected', value: adminRegStats.rejected, color: '#ff5f56', icon: '❌' },
                   { label: 'Participants', value: adminRegStats.totalParticipants, color: '#9d4edd', icon: '👥' },
-                  { label: 'Fee Collected', value: `₹${adminRegStats.totalFeeCollected}`, color: '#f59e0b', icon: '💰' },
                 ].map(stat => (
                   <div key={stat.label} style={{ background: 'rgba(0,0,0,0.4)', border: `1px solid ${stat.color}22`, borderRadius: '12px', padding: '1rem', textAlign: 'center' }}>
                     <div style={{ fontSize: '1.4rem' }}>{stat.icon}</div>
@@ -3612,7 +3461,7 @@ const BugArena = ({ onAbort }) => {
 
             {adminRegistrations.length === 0 ? (
               <div style={{ padding: '3rem', textAlign: 'center', color: '#7a7a9e' }}>
-                <p>No registrations yet. When students register and pay, their entries will appear here for verification.</p>
+                <p>No registrations yet. Student details will appear here when they register for approval.</p>
               </div>
             ) : (
               <div style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.2rem' }}>
@@ -3622,13 +3471,13 @@ const BugArena = ({ onAbort }) => {
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem 1.5rem', background: `${statusBg(reg.paymentStatus)}`, flexWrap: 'wrap', gap: '0.8rem' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
                         <span style={{ fontSize: '1.1rem', fontWeight: 800, color: '#fff', fontFamily: 'Space Grotesk, sans-serif' }}>
-                          {reg.teamType === 'duo' ? '👥' : '👤'} {(reg.members || []).map(m => m?.name || m || 'Member').join(' & ')}
+                          👤 {(reg.members || []).map(m => m?.name || m || 'Participant').join(' & ')}
                         </span>
                         <span style={{ fontSize: '0.75rem', padding: '0.25rem 0.7rem', borderRadius: '20px', background: statusBg(reg.paymentStatus), border: `1px solid ${statusColor(reg.paymentStatus)}44`, color: statusColor(reg.paymentStatus), fontWeight: 700, fontFamily: 'Space Grotesk, sans-serif', textTransform: 'uppercase' }}>
-                          {reg.paymentStatus}
+                          {reg.paymentStatus === 'verified' ? 'approved' : reg.paymentStatus === 'rejected' ? 'rejected' : 'pending approval'}
                         </span>
                         <span style={{ fontSize: '0.8rem', color: '#9d4edd', fontWeight: 700, background: 'rgba(157,78,221,0.1)', padding: '0.2rem 0.6rem', borderRadius: '8px' }}>
-                          {reg.teamType === 'duo' ? '₹100 (Duo)' : '₹50 (Solo)'}
+                          Individual registration
                         </span>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', flexWrap: 'wrap' }}>
@@ -3650,7 +3499,7 @@ const BugArena = ({ onAbort }) => {
 
                     {/* Expanded Details */}
                     {expandedReg === reg.registrationId && (
-                      <div className="ba-fade-in" style={{ padding: '1.5rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1.5rem' }}>
+                      <div className="ba-fade-in" style={{ padding: '1.5rem' }}>
                         {/* Member Details */}
                         <div>
                           <h4 style={{ color: '#00ffff', margin: '0 0 1rem', fontFamily: 'Space Grotesk, sans-serif', fontSize: '0.88rem' }}>
@@ -3661,11 +3510,11 @@ const BugArena = ({ onAbort }) => {
                               <div style={{ fontWeight: 800, color: '#e4e4f0', fontFamily: 'Space Grotesk, sans-serif', marginBottom: '0.3rem' }}>
                                 Member {i + 1}: {typeof m === 'string' ? m : (m?.name || 'Member')}
                               </div>
-                              <div style={{ fontSize: '0.82rem', color: '#9d4edd' }}>
-                                💳 UPI: <code style={{ color: '#00ffff', background: 'rgba(0,255,255,0.06)', padding: '0.1rem 0.4rem', borderRadius: '4px' }}>{m?.upiId || 'N/A'}</code>
-                              </div>
                               {m?.email && (
                                 <div style={{ fontSize: '0.8rem', color: '#7a7a9e', marginTop: '0.3rem' }}>📧 {m.email}</div>
+                              )}
+                              {m?.phone && (
+                                <div style={{ fontSize: '0.8rem', color: '#7a7a9e', marginTop: '0.3rem' }}>📱 {m.phone}</div>
                               )}
                             </div>
                           ))}
@@ -3680,7 +3529,7 @@ const BugArena = ({ onAbort }) => {
                                 className="ba-report-textarea"
                                 value={adminNoteInput}
                                 onChange={e => setAdminNoteInput(e.target.value)}
-                                placeholder="Add a note for this verification..."
+                                placeholder="Add an approval or attendance note..."
                                 style={{ minHeight: '60px', marginBottom: '0.8rem' }}
                               />
                               <div style={{ display: 'flex', gap: '0.7rem', flexWrap: 'wrap' }}>
@@ -3690,7 +3539,7 @@ const BugArena = ({ onAbort }) => {
                                   disabled={isVerifying === reg.registrationId}
                                   style={{ background: 'rgba(74,222,128,0.15)', borderColor: 'rgba(74,222,128,0.5)', color: '#4ade80' }}
                                 >
-                                  {isVerifying === reg.registrationId ? '⏳' : '✅'} Verify Payment
+                                  {isVerifying === reg.registrationId ? '⏳' : '✅'} Approve Registration
                                 </button>
                                 <button
                                   className="ba-neon-btn ba-btn-sm"
@@ -3711,34 +3560,11 @@ const BugArena = ({ onAbort }) => {
                           )}
                           {reg.verifiedAt && (
                             <div style={{ marginTop: '0.4rem', fontSize: '0.75rem', color: '#7a7a9e' }}>
-                              {reg.paymentStatus === 'verified' ? '✅ Verified' : '❌ Rejected'} at: {new Date(reg.verifiedAt).toLocaleString('en-IN')}
+                              {reg.paymentStatus === 'verified' ? '✅ Approved' : '❌ Rejected'} at: {new Date(reg.verifiedAt).toLocaleString('en-IN')}
                             </div>
                           )}
                         </div>
 
-                        {/* Payment Screenshot */}
-                        <div>
-                          <h4 style={{ color: '#fbbf24', margin: '0 0 1rem', fontFamily: 'Space Grotesk, sans-serif', fontSize: '0.88rem' }}>
-                            📸 Payment Screenshot
-                          </h4>
-                          {reg.paymentScreenshotUrl ? (
-                            <div style={{ position: 'relative' }}>
-                              <img
-                                src={reg.paymentScreenshotUrl.startsWith('http') || reg.paymentScreenshotUrl.startsWith('data:') ? reg.paymentScreenshotUrl : `${serverBase}${reg.paymentScreenshotUrl}`}
-                                alt="Payment screenshot"
-                                style={{ width: '100%', maxHeight: '340px', objectFit: 'contain', borderRadius: '10px', border: '1px solid rgba(251,191,36,0.2)', background: '#000', cursor: 'pointer' }}
-                                onClick={() => window.open(reg.paymentScreenshotUrl.startsWith('http') || reg.paymentScreenshotUrl.startsWith('data:') ? reg.paymentScreenshotUrl : `${serverBase}${reg.paymentScreenshotUrl}`, '_blank')}
-                              />
-                              <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: '#7a7a9e', textAlign: 'center' }}>
-                                🔍 Click to open full size
-                              </div>
-                            </div>
-                          ) : (
-                            <div style={{ padding: '2rem', textAlign: 'center', color: '#7a7a9e', background: 'rgba(0,0,0,0.3)', borderRadius: '10px' }}>
-                              No screenshot uploaded
-                            </div>
-                          )}
-                        </div>
                       </div>
                     )}
                   </div>
@@ -3883,19 +3709,9 @@ const BugArena = ({ onAbort }) => {
                   className="ba-neon-btn ba-btn-sm"
                   onClick={() => handleBatchAutoVerify(compareLangFilter)}
                   style={{ background: 'rgba(74, 222, 128, 0.15)', borderColor: 'rgba(74, 222, 128, 0.6)', color: '#4ade80', fontWeight: 800 }}
-                  title="Auto-confirms high-confidence bug alignments (>=60%) and awards fair winner based on verified score"
+                  title="Counts high-confidence alignments to guide manual review. It never changes points, claims, or winners."
                 >
-                  ⚡ Auto-Verify {compareLangFilter === 'all' ? 'All Matches' : compareLangFilter.toUpperCase()}
-                </button>
-
-                <button
-                  type="button"
-                  className="ba-neon-btn ba-btn-sm"
-                  onClick={() => handleBatchApplyAiVerdicts(compareLangFilter)}
-                  style={{ background: 'rgba(0, 255, 255, 0.12)', borderColor: 'rgba(0, 255, 255, 0.5)', color: '#00ffff', fontWeight: 800 }}
-                  title="Apply AI recommended winner for all pending matches in one click"
-                >
-                  🎯 Apply AI Decisions
+                  🔎 Review Suggestions
                 </button>
 
                 <button
@@ -3929,27 +3745,32 @@ const BugArena = ({ onAbort }) => {
             </div>
 
             <div style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-              {/* Language Navigation Track Pills */}
+              {/* Language Isolation Board — each column is an independent review lane */}
               <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.6rem',
-                flexWrap: 'wrap',
                 background: 'rgba(0, 0, 0, 0.45)',
                 border: '1px solid rgba(0, 255, 255, 0.2)',
                 borderRadius: '14px',
                 padding: '0.9rem 1.2rem',
               }}>
-                <span style={{ fontSize: '0.82rem', color: '#00ffff', fontWeight: 900, fontFamily: 'Space Grotesk, sans-serif', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                  <span>🌐</span> Language Isolation Tracks:
-                </span>
-                {['all', 'python', 'java', 'cpp', 'c', 'javascript', 'rust', 'go'].map((langKey) => {
-                  const count = langKey === 'all'
-                    ? reportsList.length
-                    : reportsList.filter(r => (r.language || '').toLowerCase() === langKey).length;
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+                  <span style={{ fontSize: '0.82rem', color: '#00ffff', fontWeight: 900, fontFamily: 'Space Grotesk, sans-serif' }}>
+                    🌐 Language isolation board
+                  </span>
+                  <span style={{ color: '#9fa0bd', fontSize: '0.73rem' }}>
+                    Only Python ↔ Python, Java ↔ Java, C ↔ C, and C++ ↔ C++ reports are reviewable.
+                  </span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(145px, 1fr))', gap: '0.6rem' }}>
+                {['all', ...EVENT_LANGUAGES.map(lang => lang.id)].map((langKey) => {
+                  const eligibleReports = reportsList.filter(r => {
+                    const creator = teamEntries.find(t => t.team === r.originalTeam || t.key === r.key);
+                    const reportLanguage = (r.language || '').toLowerCase();
+                    return EVENT_LANGUAGE_IDS.includes(reportLanguage) && reportLanguage === (creator?.language || '').toLowerCase();
+                  });
+                  const count = langKey === 'all' ? eligibleReports.length : eligibleReports.filter(r => (r.language || '').toLowerCase() === langKey).length;
                   const decidedCount = langKey === 'all'
-                    ? reportsList.filter(r => !!adminRegistryData?.verifications?.[r.id]).length
-                    : reportsList.filter(r => (r.language || '').toLowerCase() === langKey && !!adminRegistryData?.verifications?.[r.id]).length;
+                    ? eligibleReports.filter(r => !!adminRegistryData?.verifications?.[r.id]).length
+                    : eligibleReports.filter(r => (r.language || '').toLowerCase() === langKey && !!adminRegistryData?.verifications?.[r.id]).length;
                   const langObj = LANGUAGES.find(l => l.id === langKey);
                   const label = langKey === 'all' ? 'All Tracks' : (langObj ? langObj.name : langKey.toUpperCase());
                   const isSelected = compareLangFilter === langKey;
@@ -3960,8 +3781,8 @@ const BugArena = ({ onAbort }) => {
                       type="button"
                       onClick={() => setCompareLangFilter(langKey)}
                       style={{
-                        padding: '0.45rem 0.9rem',
-                        borderRadius: '20px',
+                        padding: '0.75rem 0.85rem',
+                        borderRadius: '10px',
                         border: isSelected ? '2px solid #00ffff' : '1px solid rgba(255, 255, 255, 0.12)',
                         background: isSelected ? 'rgba(0, 255, 255, 0.22)' : 'rgba(255, 255, 255, 0.04)',
                         color: isSelected ? '#00ffff' : '#8888aa',
@@ -3969,9 +3790,7 @@ const BugArena = ({ onAbort }) => {
                         fontSize: '0.8rem',
                         cursor: 'pointer',
                         transition: 'all 0.15s ease',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '0.45rem',
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.45rem',
                       }}
                     >
                       <span>{label}</span>
@@ -3988,6 +3807,7 @@ const BugArena = ({ onAbort }) => {
                     </button>
                   );
                 })}
+                </div>
               </div>
 
               {/* Secondary Toolbar: Status Filters & Search */}
@@ -4081,11 +3901,11 @@ const BugArena = ({ onAbort }) => {
                   if (!teamStats[r.reviewer]) {
                     teamStats[r.reviewer] = { team: r.reviewer, points: 0, wins: 0, matches: 0, verifiedBugs: 0, precision: [] };
                   }
-                  teamStats[r.reviewer].matches += 1;
-                  teamStats[r.reviewer].points += analysis.hunterScore;
-                  teamStats[r.reviewer].verifiedBugs += analysis.verifiedCount;
-                  teamStats[r.reviewer].precision.push(analysis.precisionRate);
-                  if (verdict?.winner === r.reviewer || (!verdict && analysis.recommendedWinner === r.reviewer)) {
+                  teamStats[r.reviewer].matches += verdict ? 1 : 0;
+                  teamStats[r.reviewer].points += verdict?.hunterScore || 0;
+                  teamStats[r.reviewer].verifiedBugs += verdict?.verifiedCount || 0;
+                  if (verdict) teamStats[r.reviewer].precision.push(analysis.precisionRate);
+                  if (verdict?.winner === r.reviewer) {
                     teamStats[r.reviewer].wins += 1;
                   }
 
@@ -4093,9 +3913,9 @@ const BugArena = ({ onAbort }) => {
                   if (!teamStats[r.originalTeam]) {
                     teamStats[r.originalTeam] = { team: r.originalTeam, points: 0, wins: 0, matches: 0, verifiedBugs: 0, precision: [] };
                   }
-                  teamStats[r.originalTeam].matches += 1;
-                  teamStats[r.originalTeam].points += analysis.creatorScore;
-                  if (verdict?.winner === r.originalTeam || (!verdict && analysis.recommendedWinner === r.originalTeam)) {
+                  teamStats[r.originalTeam].matches += verdict ? 1 : 0;
+                  teamStats[r.originalTeam].points += verdict?.creatorScore || 0;
+                  if (verdict?.winner === r.originalTeam) {
                     teamStats[r.originalTeam].wins += 1;
                   }
                 });
@@ -4164,10 +3984,20 @@ const BugArena = ({ onAbort }) => {
               {/* Match Entries */}
               {(() => {
                 const filteredReports = reportsList.filter(r => {
+                  const creatorData = teamEntries.find(t => t.team === r.originalTeam || t.key === r.key);
+                  const reportLanguage = (r.language || '').toLowerCase();
+                  const creatorLanguage = (creatorData?.language || '').toLowerCase();
+
+                  // Only the four announced tracks participate. A report that
+                  // does not match the original submission's language is held
+                  // out of scoring rather than mixing language columns.
+                  if (!EVENT_LANGUAGE_IDS.includes(reportLanguage) ||
+                    !EVENT_LANGUAGE_IDS.includes(creatorLanguage) ||
+                    reportLanguage !== creatorLanguage) return false;
+
                   // 1. Language track filter
                   if (compareLangFilter !== 'all') {
-                    const lang = (r.language || '').toLowerCase() || 'python';
-                    if (lang !== compareLangFilter.toLowerCase()) return false;
+                    if (reportLanguage !== compareLangFilter.toLowerCase()) return false;
                   }
 
                   // 2. Search query filter
@@ -4181,7 +4011,6 @@ const BugArena = ({ onAbort }) => {
 
                   // 3. Status filter
                   const savedVerdict = adminRegistryData?.verifications?.[r.id];
-                  const creatorData = teamEntries.find(t => t.team === r.originalTeam || t.key === r.key);
                   const analysis = computeDeepBugAnalysis(r, creatorData, bugOverrides[r.id] || {});
 
                   if (compareStatusFilter === 'pending' && !!savedVerdict) return false;
@@ -4213,6 +4042,7 @@ const BugArena = ({ onAbort }) => {
                   const isDossierOpen = !!expandedAiDossier[r.id];
                   const isCodeOpen = !!activeCodeInspector[r.id];
                   const currentHighlightedLine = highlightedCodeLine[r.id] || null;
+                  const isReviewed = !!reviewedVerifications[r.id] || !!savedVerdict;
 
                   // Validate language isolation
                   const hunterLang = (r.language || '').toLowerCase();
@@ -4286,13 +4116,13 @@ const BugArena = ({ onAbort }) => {
                             <span style={{
                               fontSize: '0.78rem',
                               fontWeight: 800,
-                              color: analysis.status === 'PERFECT' ? '#4ade80' : analysis.status === 'PARTIAL' ? '#fbbf24' : '#ff5f56',
-                              background: analysis.status === 'PERFECT' ? 'rgba(74,222,128,0.15)' : analysis.status === 'PARTIAL' ? 'rgba(251,191,36,0.15)' : 'rgba(255,95,86,0.15)',
-                              border: `1px solid ${analysis.status === 'PERFECT' ? 'rgba(74,222,128,0.5)' : analysis.status === 'PARTIAL' ? 'rgba(251,191,36,0.5)' : 'rgba(255,95,86,0.5)'}`,
+                              color: savedVerdict ? '#4ade80' : isReviewed ? '#fbbf24' : '#00ffff',
+                              background: savedVerdict ? 'rgba(74,222,128,0.15)' : isReviewed ? 'rgba(251,191,36,0.15)' : 'rgba(0,255,255,0.1)',
+                              border: `1px solid ${savedVerdict ? 'rgba(74,222,128,0.5)' : isReviewed ? 'rgba(251,191,36,0.5)' : 'rgba(0,255,255,0.4)'}`,
                               borderRadius: '20px',
                               padding: '0.2rem 0.8rem',
                             }}>
-                              {analysis.status === 'PERFECT' ? '🟢 100% CLEAN CATCH' : analysis.status === 'PARTIAL' ? `🟡 ${analysis.verifiedCount} VERIFIED BUGS` : '🔴 0 VERIFIED MATCHES'}
+                              {savedVerdict ? `✅ DECIDED: ${savedVerdict.winner}` : isReviewed ? `🟡 READY TO DECLARE (${analysis.verifiedCount} confirmed)` : '🔎 EVIDENCE NOT YET REVIEWED'}
                             </span>
 
                             <span style={{ fontSize: '0.78rem', color: '#a0a0c5' }}>
@@ -4337,11 +4167,15 @@ const BugArena = ({ onAbort }) => {
                                 verifiedCount: analysis.verifiedCount,
                                 reason: analysis.recommendationReason,
                               })}
+                              disabled={!isReviewed}
+                              title={isReviewed ? 'Save finding team as the winner' : 'Open and review the evidence before declaring a winner'}
                               style={{
                                 background: savedVerdict?.winner === r.reviewer ? 'rgba(74, 222, 128, 0.3)' : 'rgba(74, 222, 128, 0.12)',
                                 borderColor: 'rgba(74, 222, 128, 0.6)',
                                 color: '#4ade80',
                                 fontWeight: 800,
+                                opacity: isReviewed ? 1 : 0.45,
+                                cursor: isReviewed ? 'pointer' : 'not-allowed',
                               }}
                             >
                               🥇 Award: {r.reviewer} ({analysis.hunterScore} pts)
@@ -4356,11 +4190,15 @@ const BugArena = ({ onAbort }) => {
                                 verifiedCount: analysis.verifiedCount,
                                 reason: analysis.recommendationReason,
                               })}
+                              disabled={!isReviewed}
+                              title={isReviewed ? 'Save creating team as the winner' : 'Open and review the evidence before declaring a winner'}
                               style={{
                                 background: savedVerdict?.winner === r.originalTeam ? 'rgba(255, 107, 107, 0.3)' : 'rgba(255, 107, 107, 0.12)',
                                 borderColor: 'rgba(255, 107, 107, 0.6)',
                                 color: '#ff6b6b',
                                 fontWeight: 800,
+                                opacity: isReviewed ? 1 : 0.45,
+                                cursor: isReviewed ? 'pointer' : 'not-allowed',
                               }}
                             >
                               🥇 Award: {r.originalTeam} ({analysis.creatorScore} pts)
@@ -4375,13 +4213,28 @@ const BugArena = ({ onAbort }) => {
                                 verifiedCount: analysis.verifiedCount,
                                 reason: 'Admin declared tie',
                               })}
-                              style={{ background: 'rgba(251, 191, 36, 0.1)', borderColor: 'rgba(251, 191, 36, 0.4)', color: '#fbbf24' }}
+                              disabled={!isReviewed}
+                              title={isReviewed ? 'Save a draw decision' : 'Open and review the evidence before declaring a winner'}
+                              style={{ background: 'rgba(251, 191, 36, 0.1)', borderColor: 'rgba(251, 191, 36, 0.4)', color: '#fbbf24', opacity: isReviewed ? 1 : 0.45, cursor: isReviewed ? 'pointer' : 'not-allowed' }}
                             >
                               🤝 Draw
                             </button>
                           </div>
                         </div>
                       </div>
+
+                      <details
+                        onToggle={(event) => {
+                          if (event.currentTarget.open) setReviewedVerifications(prev => ({ ...prev, [r.id]: true }));
+                        }}
+                        style={{ borderTop: '1px solid rgba(255,255,255,0.07)' }}
+                      >
+                        <summary style={{ cursor: 'pointer', padding: '1rem 1.6rem', color: '#00ffff', fontWeight: 800, fontSize: '0.86rem', listStyle: 'none', display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center' }}>
+                          <span>1. Review bug evidence before declaring a winner</span>
+                          <span style={{ color: '#a0a0c5', fontSize: '0.76rem', fontWeight: 600 }}>
+                            {analysis.pairs.length} suggested • {analysis.unmatchedHunterBugs.length} unmatched • {analysis.missedCreatorBugs.length} missed
+                          </span>
+                        </summary>
 
                       {/* AI Judging Recommendation Banner */}
                       <div style={{
@@ -4397,7 +4250,7 @@ const BugArena = ({ onAbort }) => {
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flex: 1 }}>
                           <span style={{ fontSize: '1.1rem' }}>🤖</span>
                           <span style={{ fontSize: '0.82rem', color: '#e4e4f0' }}>
-                            <strong>Smart Verdict Recommendation:</strong>{' '}
+                            <strong>Review aid only — no points are awarded automatically:</strong>{' '}
                             <span style={{ color: analysis.recommendedWinner === r.reviewer ? '#4ade80' : analysis.recommendedWinner === r.originalTeam ? '#ff6b6b' : '#fbbf24', fontWeight: 800 }}>
                               {analysis.recommendedWinner}
                             </span>
@@ -4536,7 +4389,7 @@ const BugArena = ({ onAbort }) => {
                           <div>
                             <div style={{ fontSize: '0.78rem', fontWeight: 800, color: '#4ade80', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                               <span>✅</span>
-                              <span>Verified Bug Alignments ({analysis.pairs.length} Matched Conceptually)</span>
+                              <span>Suggested Bug Alignments — confirm or reject ({analysis.pairs.length})</span>
                             </div>
 
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
@@ -4674,13 +4527,14 @@ const BugArena = ({ onAbort }) => {
                           <div style={{ marginTop: '0.5rem' }}>
                             <div style={{ fontSize: '0.78rem', fontWeight: 800, color: '#fbbf24', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                               <span>⚠️</span>
-                              <span>Unmatched Hunter Claims — False Claim Penalty Applied ({analysis.unmatchedHunterBugs.length})</span>
+                              <span>Unmatched Hunter Claims — Admin Review Needed ({analysis.unmatchedHunterBugs.length})</span>
                             </div>
 
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
                               {analysis.unmatchedHunterBugs.map(({ hBug, hIdx }, uIdx) => {
                                 const overrideKey = `${r.id}_h${hBug.id || hIdx}`;
                                 const isBonus = bugOverrides[r.id]?.[overrideKey] === 'bonus';
+                                const isRejected = bugOverrides[r.id]?.[overrideKey] === 'rejected';
 
                                 return (
                                   <div
@@ -4702,7 +4556,7 @@ const BugArena = ({ onAbort }) => {
                                           Reported by {r.reviewer} — Line #{hBug.lineNumber || 'N/A'}
                                         </span>
                                         <span style={{ background: isBonus ? 'rgba(0,255,255,0.15)' : 'rgba(255,95,86,0.15)', color: isBonus ? '#00ffff' : '#ff7777', padding: '0.1rem 0.5rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 800 }}>
-                                          {isBonus ? '⭐ ACCEPTED AS BONUS GENUINE BUG (+75 pts)' : '⚠️ UNMATCHED BY CREATOR (-40 pts penalty)'}
+                                          {isBonus ? '⭐ ACCEPTED AS BONUS GENUINE BUG (+75 pts)' : isRejected ? '✕ REJECTED CLAIM (-40 pts)' : '⚠️ UNMATCHED — review before accepting or rejecting'}
                                         </span>
                                         <button
                                           type="button"
@@ -4725,7 +4579,7 @@ const BugArena = ({ onAbort }) => {
                                       )}
                                     </div>
 
-                                    <div>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
                                       <button
                                         type="button"
                                         onClick={() => handleToggleBugOverride(r.id, overrideKey, 'bonus')}
@@ -4741,6 +4595,17 @@ const BugArena = ({ onAbort }) => {
                                         }}
                                       >
                                         {isBonus ? '✓ Marked as Bonus' : '⭐ Grant Bonus Bug'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleToggleBugOverride(r.id, overrideKey, 'rejected')}
+                                        style={{
+                                          padding: '0.35rem 0.8rem', borderRadius: '6px', fontSize: '0.72rem', fontWeight: 800,
+                                          cursor: 'pointer', border: isRejected ? '1px solid #ff5f56' : '1px solid rgba(255,95,86,0.3)',
+                                          background: isRejected ? 'rgba(255,95,86,0.2)' : 'transparent', color: '#ff7777',
+                                        }}
+                                      >
+                                        {isRejected ? '✓ Rejection saved' : '✕ Reject claim'}
                                       </button>
                                     </div>
                                   </div>
@@ -4800,6 +4665,7 @@ const BugArena = ({ onAbort }) => {
                           </div>
                         )}
                       </div>
+                      </details>
                     </div>
                   );
                 });
@@ -5025,6 +4891,7 @@ const BugArena = ({ onAbort }) => {
         <AdminLoginModal 
           onClose={() => setAdminModalOpen(false)} 
           onLogin={handleAdminLogin} 
+          isAuthenticating={isAdminAuthenticating}
         />
       )}
 
@@ -5059,7 +4926,7 @@ const BugArena = ({ onAbort }) => {
                 <li><span className="ba-rule-num">04</span> Event hosts decide which 6-letter key goes to which rival team.</li>
                 <li><span className="ba-rule-num">05</span> In the <strong>Exchange</strong> portal, enter the 6-letter key you received and press <strong>Decode</strong>.</li>
                 <li><span className="ba-rule-num">06</span> Submit a Bug Report with the line numbers, descriptions, and suggested fixes.</li>
-                <li><span className="ba-rule-num">07</span> The Admin Portal automatically verifies matches and calculates final team scores! 🏆</li>
+                <li><span className="ba-rule-num">07</span> Admins review every reported bug before saving final scores and winners. 🏆</li>
               </ul>
             </div>
           </div>
@@ -5172,7 +5039,7 @@ const BugArena = ({ onAbort }) => {
                       value={language}
                       onChange={(e) => setLanguage(e.target.value)}
                     >
-                      {LANGUAGES.map(lang => (
+                      {EVENT_LANGUAGES.map(lang => (
                         <option key={lang.id} value={lang.id}>
                           {lang.name} ({lang.ext})
                         </option>
@@ -5186,6 +5053,25 @@ const BugArena = ({ onAbort }) => {
                   </button>
                 </form>
               </div>
+            </div>
+          ) : !isAdminLoggedIn && globalEventPhase !== 'post_event' && !isFullscreen ? (
+            <div className="ba-fade-in" style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+              minHeight: '420px', gap: '1.4rem', textAlign: 'center', padding: '3rem 2rem',
+              background: 'radial-gradient(ellipse at center, rgba(251,191,36,0.1) 0%, rgba(10,12,24,0.8) 70%)',
+              border: '2px solid rgba(251,191,36,0.45)', borderRadius: '18px',
+            }}>
+              <div style={{ fontSize: '3.5rem' }}>🔒</div>
+              <div>
+                <h2 style={{ margin: 0, color: '#fbbf24', fontFamily: 'Space Grotesk, sans-serif' }}>Fullscreen required</h2>
+                <p style={{ maxWidth: '540px', color: '#b0b0d0', lineHeight: 1.65, margin: '0.7rem auto 0' }}>
+                  Enter fullscreen to begin the live arena. Leaving fullscreen before final judging locks your session and requires administrator approval.
+                </p>
+              </div>
+              <button className="ba-neon-btn ba-btn-yellow" onClick={handleUnlockWorkspace} style={{ fontSize: '1rem', padding: '0.9rem 2rem' }}>
+                ⛶ Enter Fullscreen &amp; Begin
+              </button>
+              <span style={{ color: '#7777aa', fontSize: '0.78rem' }}>Fullscreen ends automatically when the administrator starts final judging.</span>
             </div>
           ) : (
             <>

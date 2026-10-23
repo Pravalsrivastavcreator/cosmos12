@@ -7,9 +7,6 @@
  *   MONGO_URI            — MongoDB Atlas connection string
  *   PORT                 — (auto-set by Render, default 5000)
  *   ALLOWED_ORIGINS      — comma-separated frontend URLs
- *   CLOUDINARY_CLOUD_NAME — Cloudinary cloud name (for screenshot uploads)
- *   CLOUDINARY_API_KEY    — Cloudinary API key
- *   CLOUDINARY_API_SECRET — Cloudinary API secret
  *   NODE_ENV             — "production" or "development"
  */
 
@@ -17,9 +14,6 @@ const express    = require('express');
 const mongoose   = require('mongoose');
 const cors       = require('cors');
 const dotenv     = require('dotenv');
-const multer     = require('multer');
-const path       = require('path');
-const fs         = require('fs');
 const crypto     = require('crypto');
 const helmet     = require('helmet');
 const rateLimit  = require('express-rate-limit');
@@ -35,7 +29,7 @@ const app = express();
 // Security headers (production only to avoid dev friction)
 if (IS_PROD) {
   app.use(helmet({
-    crossOriginResourcePolicy: { policy: 'cross-origin' }, // Allow serving screenshots
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
     contentSecurityPolicy: false, // Frontend controls CSP
   }));
 }
@@ -105,25 +99,6 @@ mongoose.connect(MONGO_URI, {
     if (IS_PROD) process.exit(1); // Hard fail in production — don't serve without DB
   });
 
-// ─── Multer / File Upload Setup ───────────────────────────────────────────────
-// We use memory storage to keep the uploaded file in memory (req.file.buffer).
-// It is then directly saved into MongoDB as a Base64 string.
-const storage = multer.memoryStorage();
-
-const fileFilter = (req, file, cb) => {
-  const allowedTypes = /jpeg|jpg|png|webp/;
-  const ext  = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-  const mime = allowedTypes.test(file.mimetype);
-  if (ext && mime) return cb(null, true);
-  cb(new Error('Only image files (jpg, png, webp) are allowed!'), false);
-};
-
-const upload = multer({
-  storage,
-  fileFilter,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
-});
-
 // ─── Mongoose Schemas ─────────────────────────────────────────────────────────
 
 const RegistrySchema = new mongoose.Schema({
@@ -132,19 +107,25 @@ const RegistrySchema = new mongoose.Schema({
 }, { minimize: false });
 const Registry = mongoose.model('Registry', RegistrySchema);
 
+// SSE keeps phase changes and proctoring alerts instant without making every
+// participant repeatedly download the full registry document.
+const phaseSubscribers = new Set();
+const adminAlertSubscribers = new Set();
+const publishSse = (subscribers, event, payload) => {
+  const message = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
+  subscribers.forEach(res => { res.write(message); res.flush?.(); });
+};
+const publishPhase = (globalState) => publishSse(phaseSubscribers, 'phase', globalState);
+const publishAdminAlert = (alert) => publishSse(adminAlertSubscribers, 'proctoring-alert', alert);
+
 const RegistrationSchema = new mongoose.Schema({
   registrationId:       { type: String, unique: true },
-  teamType:             { type: String, enum: ['solo', 'duo'], required: true },
+  teamType:             { type: String, enum: ['solo'], default: 'solo' },
   members: [{
     name:  { type: String, required: true },
-    upiId: { type: String, required: true },
     email: { type: String, default: '' },
+    phone: { type: String, default: '' },
   }],
-  feeAmount:            { type: Number, required: true },
-  paymentScreenshotUrl: { type: String, default: '' },
-  paymentScreenshotData: { type: String, select: false }, // Stored as Base64. Default omitted in queries
-  paymentScreenshotMime: { type: String, default: 'image/jpeg' },
-  screenshotHash:       { type: String, default: '' },
   paymentStatus: {
     type: String,
     enum: ['pending', 'verified', 'rejected'],
@@ -157,6 +138,7 @@ const RegistrationSchema = new mongoose.Schema({
   contestStartedAt:     { type: Date },
   lastContestPhase:     { type: String, default: '' },
   hasSubmittedCode:     { type: Boolean, default: false },
+  programmingLanguage:  { type: String, default: '' },
 }, { timestamps: true });
 const Registration = mongoose.model('Registration', RegistrationSchema);
 
@@ -183,6 +165,69 @@ const getRegistryDoc = async () => {
   }
   return doc;
 };
+
+// Lightweight phase channel: one tiny payload instead of the shared code and
+// reports registry. SSE pushes host transitions to all connected players.
+app.get('/api/event-phase', async (_req, res) => {
+  try {
+    const doc = await getRegistryDoc();
+    res.set('Cache-Control', 'no-store');
+    res.json(doc.data?.globalState || { phase: 'pre_event', lastChanged: 0, history: [] });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error.' });
+  }
+});
+
+app.get('/api/event-phase/stream', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.flushHeaders();
+  phaseSubscribers.add(res);
+  res.write('retry: 1500\n\n');
+  getRegistryDoc().then(doc => publishSse(new Set([res]), 'phase', doc.data?.globalState || { phase: 'pre_event' })).catch(() => {});
+  const heartbeat = setInterval(() => { res.write(': keepalive\n\n'); res.flush?.(); }, 25000);
+  req.on('close', () => { clearInterval(heartbeat); phaseSubscribers.delete(res); });
+});
+
+app.patch('/api/event-phase', async (req, res) => {
+  try {
+    const { phase } = req.body;
+    const allowed = ['pre_event', 'coding', 'exchange', 'hunting', 'post_event'];
+    if (!allowed.includes(phase)) return res.status(400).json({ error: 'Invalid event phase.' });
+    const doc = await getRegistryDoc();
+    const previous = doc.data?.globalState?.phase || 'pre_event';
+    const globalState = {
+      ...(doc.data?.globalState || {}),
+      phase,
+      lastChanged: Date.now(),
+      history: [...(doc.data?.globalState?.history || []).slice(-9), { from: previous, to: phase, at: new Date().toISOString() }],
+    };
+    doc.data = { ...(doc.data || {}), globalState };
+    doc.markModified('data');
+    await doc.save();
+    publishPhase(globalState);
+    res.json({ success: true, globalState });
+  } catch (err) {
+    console.error('Event phase update error:', err);
+    res.status(500).json({ error: 'Server error.' });
+  }
+});
+
+app.get('/api/admin-alerts/stream', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive', 'X-Accel-Buffering': 'no',
+  });
+  res.flushHeaders();
+  adminAlertSubscribers.add(res);
+  res.write('retry: 1500\n\n');
+  const heartbeat = setInterval(() => { res.write(': keepalive\n\n'); res.flush?.(); }, 25000);
+  req.on('close', () => { clearInterval(heartbeat); adminAlertSubscribers.delete(res); });
+});
 
 // ─── Admin Login (credentials stored only in server environment) ────────────
 // A strict rate limiter: max 50 attempts per 15 minutes per IP
@@ -248,12 +293,98 @@ app.put('/api/registry', async (req, res) => {
   }
 });
 
+// Atomic arena writes. Clients must not fetch-and-replace the entire registry:
+// with 100 students, simultaneous PUTs would race and could lose submissions.
+app.post('/api/submissions', async (req, res) => {
+  try {
+    const payload = req.body || {};
+    if (!/^[A-Z0-9]{6}$/.test(payload.key || '') || !payload.team || !payload.code || !payload.language) {
+      return res.status(400).json({ error: 'A valid key, team, language, and code are required.' });
+    }
+    const ownerRegistrationId = String(payload.registrationId || '');
+    const ownerTeam = String(payload.team || '').trim().toLowerCase();
+    // A participant may submit again after editing. Filter out every previous
+    // submission for that participant before writing the latest version, even
+    // if their browser generated a different key after a reconnect.
+    await Registry.updateOne(
+      { singletonId: 'registry' },
+      [{
+        $set: {
+          data: {
+            $arrayToObject: {
+              $concatArrays: [
+                {
+                  $filter: {
+                    input: { $objectToArray: { $ifNull: ['$data', {}] } },
+                    as: 'entry',
+                    cond: {
+                      $or: [
+                        { $in: ['$$entry.k', ['reports', 'globalState', 'verifications']] },
+                        {
+                          $and: [
+                            { $ne: [{ $ifNull: ['$$entry.v.registrationId', ''] }, ownerRegistrationId] },
+                            { $ne: [{ $toLower: { $ifNull: ['$$entry.v.team', ''] } }, ownerTeam] },
+                          ],
+                        },
+                      ],
+                    },
+                  },
+                },
+                [{ k: payload.key, v: payload }],
+              ],
+            },
+          },
+        },
+      }],
+      { upsert: true }
+    );
+    res.status(201).json({ success: true, key: payload.key });
+  } catch (err) {
+    console.error('Submission save error:', err);
+    res.status(500).json({ error: 'Could not save submission.' });
+  }
+});
+
+app.post('/api/reports', async (req, res) => {
+  try {
+    const report = req.body || {};
+    if (!report.id || !report.reviewer || !report.originalTeam || !report.language || !Array.isArray(report.foundBugs)) {
+      return res.status(400).json({ error: 'Incomplete bug report.' });
+    }
+    await Registry.updateOne(
+      { singletonId: 'registry' },
+      { $setOnInsert: { singletonId: 'registry' }, $push: { 'data.reports': report } },
+      { upsert: true }
+    );
+    res.status(201).json({ success: true, id: report.id });
+  } catch (err) {
+    console.error('Report save error:', err);
+    res.status(500).json({ error: 'Could not save report.' });
+  }
+});
+
+app.patch('/api/verifications/:reportId', async (req, res) => {
+  try {
+    const reportId = req.params.reportId;
+    if (!reportId || !req.body?.winner) return res.status(400).json({ error: 'A winner decision is required.' });
+    await Registry.updateOne(
+      { singletonId: 'registry' },
+      { $setOnInsert: { singletonId: 'registry' }, $set: { [`data.verifications.${reportId}`]: req.body } },
+      { upsert: true }
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Verification save error:', err);
+    res.status(500).json({ error: 'Could not save verification.' });
+  }
+});
+
 // ─── Registration Routes ──────────────────────────────────────────────────────
 
-// POST /api/register — Submit registration + payment screenshot
-app.post('/api/register', registrationLimiter, upload.single('paymentScreenshot'), async (req, res) => {
+// POST /api/register — Free registration, awaiting organizer approval
+app.post('/api/register', registrationLimiter, async (req, res) => {
   try {
-    const { teamType, members, feeAmount } = req.body;
+    const { members } = req.body;
 
     let parsedMembers;
     try {
@@ -262,30 +393,23 @@ app.post('/api/register', registrationLimiter, upload.single('paymentScreenshot'
       return res.status(400).json({ error: 'Invalid members data.' });
     }
 
-    if (!['solo', 'duo'].includes(teamType)) {
-      return res.status(400).json({ error: 'Invalid team type.' });
+    if (!Array.isArray(parsedMembers) || parsedMembers.length !== 1) {
+      return res.status(400).json({ error: 'Individual registration requires exactly one participant.' });
     }
 
-    const expectedCount = teamType === 'solo' ? 1 : 2;
-    if (!parsedMembers || parsedMembers.length !== expectedCount) {
-      return res.status(400).json({ error: `${teamType} team must have exactly ${expectedCount} member(s).` });
-    }
-
+    const normalizedMembers = [];
     for (const m of parsedMembers) {
       if (!m.name?.trim()) return res.status(400).json({ error: 'Each member must have a name.' });
-      if (!m.upiId?.trim()) return res.status(400).json({ error: 'Each member must have a UPI ID.' });
-      if (!/^[a-zA-Z0-9._-]+@[a-zA-Z0-9]+$/.test(m.upiId.trim())) {
-        return res.status(400).json({ error: `Invalid UPI ID format: "${m.upiId}"` });
-      }
-    }
-
-    const expectedFee = teamType === 'solo' ? 50 : 100;
-    if (parseInt(feeAmount) !== expectedFee) {
-      return res.status(400).json({ error: `Fee must be ₹${expectedFee} for ${teamType}.` });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({ error: 'Payment screenshot is required.' });
+      const email = String(m.email || '').trim().toLowerCase();
+      const phone = String(m.phone || '').replace(/\D/g, '').replace(/^91(?=\d{10}$)/, '');
+      if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address for each member.' });
+      if (!/^[6-9]\d{9}$/.test(phone)) return res.status(400).json({ error: 'Enter a valid 10-digit Indian phone number for each member.' });
+      const existing = await Registration.findOne({
+        paymentStatus: { $ne: 'rejected' },
+        $or: [{ 'members.email': email }, { 'members.phone': phone }],
+      });
+      if (existing) return res.status(409).json({ error: `${email} or ${phone} is already registered.` });
+      normalizedMembers.push({ name: m.name.trim(), email, phone });
     }
 
     // Generate unique registration ID first so we can use it in the URL
@@ -293,62 +417,23 @@ app.post('/api/register', registrationLimiter, upload.single('paymentScreenshot'
       Date.now().toString(36).toUpperCase() + '-' +
       crypto.randomBytes(3).toString('hex').toUpperCase();
 
-    // Compute hash for duplicate detection from the buffer
-    const fileBuffer = req.file.buffer;
-    const screenshotHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-    const paymentScreenshotUrl = `/api/registrations/${registrationId}/screenshot`;
-
-    // Anti-fraud: duplicate screenshot check
-    const duplicate = await Registration.findOne({
-      screenshotHash,
-      paymentStatus: { $ne: 'rejected' },
-    });
-    if (duplicate) {
-      return res.status(409).json({
-        error: 'This payment screenshot has already been submitted for another registration.',
-      });
-    }
-
-    // Anti-fraud: duplicate UPI check
-    for (const m of parsedMembers) {
-      const existingUpi = await Registration.findOne({
-        'members.upiId': m.upiId.trim(),
-        paymentStatus: { $ne: 'rejected' },
-      });
-      if (existingUpi) {
-        return res.status(409).json({
-          error: `UPI ID "${m.upiId}" is already registered. Each person can only register once.`,
-        });
-      }
-    }
-
     const registration = new Registration({
       registrationId,
-      teamType,
-      members: parsedMembers.map(m => ({
-        name:  m.name.trim(),
-        upiId: m.upiId.trim(),
-        email: (m.email || '').trim(),
-      })),
-      feeAmount: parseInt(feeAmount),
-      paymentScreenshotUrl,
-      paymentScreenshotData: fileBuffer.toString('base64'),
-      paymentScreenshotMime: req.file.mimetype,
-      screenshotHash,
+      teamType: 'solo',
+      members: normalizedMembers,
       paymentStatus: 'pending',
     });
 
     await registration.save();
 
-    console.log(`📝 New registration: ${registrationId} | ${teamType} | ${parsedMembers.map(m => m.name).join(', ')}`);
+    console.log(`📝 New registration: ${registrationId} | solo | ${parsedMembers[0].name}`);
 
     res.status(201).json({
       success:        true,
       registrationId,
-      message:        'Registration submitted! Your payment is under review.',
-      teamType,
-      members:        parsedMembers.map(m => m.name),
-      feeAmount:      parseInt(feeAmount),
+      message:        'Registration submitted! It is awaiting organizer approval.',
+      teamType: 'solo',
+      members:        normalizedMembers.map(m => m.name),
     });
 
   } catch (err) {
@@ -373,29 +458,22 @@ app.get('/api/registrations', async (req, res) => {
 // GET /api/registrations/stats — Admin dashboard stats
 app.get('/api/registrations/stats', async (req, res) => {
   try {
-    const [total, pending, verified, rejected, soloCount, duoCount, feeAgg] = await Promise.all([
+    const [total, pending, verified, rejected] = await Promise.all([
       Registration.countDocuments(),
       Registration.countDocuments({ paymentStatus: 'pending' }),
       Registration.countDocuments({ paymentStatus: 'verified' }),
       Registration.countDocuments({ paymentStatus: 'rejected' }),
-      Registration.countDocuments({ teamType: 'solo' }),
-      Registration.countDocuments({ teamType: 'duo' }),
-      Registration.aggregate([
-        { $match: { paymentStatus: 'verified' } },
-        { $group: { _id: null, total: { $sum: '$feeAmount' } } },
-      ]),
     ]);
     res.json({
-      total, pending, verified, rejected, soloCount, duoCount,
-      totalFeeCollected:  feeAgg[0]?.total || 0,
-      totalParticipants:  soloCount + duoCount * 2,
+      total, pending, verified, rejected,
+      totalParticipants: total,
     });
   } catch (err) {
     res.status(500).json({ error: 'Server error.' });
   }
 });
 
-// PATCH /api/registrations/:id/verify — Admin: verify or reject
+// PATCH /api/registrations/:id/verify — Admin: approve or reject
 app.patch('/api/registrations/:id/verify', async (req, res) => {
   try {
     const { status, adminNote } = req.body;
@@ -419,30 +497,12 @@ app.patch('/api/registrations/:id/verify', async (req, res) => {
   }
 });
 
-// GET /api/registrations/:id/status — Polling endpoint for participant to check if admin verified them
+// GET /api/registrations/:id/status — Participant approval status
 app.get('/api/registrations/:id/status', async (req, res) => {
   try {
     const reg = await Registration.findOne({ registrationId: req.params.id }).select('paymentStatus');
     if (!reg) return res.status(404).json({ error: 'Registration not found.' });
     res.json({ status: reg.paymentStatus });
-  } catch (err) {
-    res.status(500).json({ error: 'Server error.' });
-  }
-});
-
-// GET /api/registrations/:id/screenshot — Serve screenshot dynamically from MongoDB
-app.get('/api/registrations/:id/screenshot', async (req, res) => {
-  try {
-    // Explicitly select the paymentScreenshotData since it's excluded by default
-    const reg = await Registration.findOne({ registrationId: req.params.id }).select('+paymentScreenshotData paymentScreenshotMime');
-    if (!reg || !reg.paymentScreenshotData) {
-      return res.status(404).json({ error: 'Screenshot not found.' });
-    }
-    
-    const buffer = Buffer.from(reg.paymentScreenshotData, 'base64');
-    res.set('Content-Type', reg.paymentScreenshotMime || 'image/jpeg');
-    res.set('Content-Length', buffer.length);
-    res.send(buffer);
   } catch (err) {
     res.status(500).json({ error: 'Server error.' });
   }
@@ -466,7 +526,7 @@ app.post('/api/arena-login', async (req, res) => {
       return res.status(403).json({ error: 'Your registration was rejected. Contact the organizer.' });
     }
     if (reg.paymentStatus === 'pending') {
-      return res.status(403).json({ status: 'pending', error: 'Your payment is still under review. Please wait for admin verification.' });
+      return res.status(403).json({ status: 'pending', error: 'Your registration is awaiting organizer approval.' });
     }
     // verified
     const memberNames = reg.members.map(m => m.name).join(' & ');
@@ -516,6 +576,7 @@ app.post('/api/arena-login', async (req, res) => {
       success: true,
       registrationId: reg.registrationId,
       teamType: reg.teamType,
+      programmingLanguage: reg.programmingLanguage || '',
       members: reg.members.map(m => ({ name: m.name, email: m.email })),
       isLocked,
       cheatReport: cheat ? {
@@ -528,6 +589,31 @@ app.post('/api/arena-login', async (req, res) => {
     });
   } catch (err) {
     console.error('Arena login error:', err);
+    res.status(500).json({ error: 'Server error.' });
+  }
+});
+
+// Persist a team's language independently of browser storage. This preserves
+// Java/C++/etc. when the participant logs in again for a later round.
+app.patch('/api/arena-profile', async (req, res) => {
+  try {
+    const registrationId = (req.body.registrationId || '').trim().toUpperCase();
+    const programmingLanguage = (req.body.programmingLanguage || '').trim().toLowerCase();
+    // These are the only announced event tracks. Enforce the same list on the
+    // server so a client cannot submit a language outside its verification lane.
+    const allowedLanguages = new Set(['python', 'java', 'c', 'cpp']);
+    if (!registrationId || !allowedLanguages.has(programmingLanguage)) {
+      return res.status(400).json({ error: 'A valid registration ID and programming language are required.' });
+    }
+    const registration = await Registration.findOneAndUpdate(
+      { registrationId, paymentStatus: 'verified' },
+      { $set: { programmingLanguage } },
+      { new: true }
+    );
+    if (!registration) return res.status(404).json({ error: 'Verified registration not found.' });
+    res.json({ success: true, programmingLanguage: registration.programmingLanguage });
+  } catch (err) {
+    console.error('Arena profile update error:', err);
     res.status(500).json({ error: 'Server error.' });
   }
 });
@@ -623,6 +709,10 @@ app.post('/api/cheat-report', cheatLimiter, async (req, res) => {
       { upsert: true, new: true }
     );
     console.log(`🚨 [ZERO-TOLERANCE LOCKED] ${cleanTeam} (${cleanRegId}): ${reason}`);
+    publishAdminAlert({
+      id: report._id.toString(), teamName: report.teamName, registrationId: report.registrationId,
+      reason: report.reason, phase: report.phase, timestamp: report.timestamp,
+    });
     res.status(201).json({ success: true, reportId: report._id, _id: report._id });
   } catch (err) {
     console.error('Cheat report error:', err);

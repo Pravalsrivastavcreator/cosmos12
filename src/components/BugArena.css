@@ -1410,16 +1410,14 @@
 
 /* ─── Thank-You Submission Modal ──────────────────────────────────────────── */
 .ba-thankyou-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 9999;
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(8, 8, 20, 0.82);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  animation: baTyOverlayIn 0.35s ease forwards;
+  margin: 0 auto 1.5rem;
+  background: transparent;
+  animation: baTyOverlayIn 0.25s ease forwards;
 }
 
 @keyframes baTyOverlayIn {
@@ -1432,21 +1430,21 @@
   background: linear-gradient(145deg, #0e0e2a 0%, #12122e 60%, #0a0a20 100%);
   border: 2px solid transparent;
   background-clip: padding-box;
-  border-radius: 24px;
-  padding: 3rem 3.5rem;
+  border-radius: 16px;
+  padding: 1.4rem 1.8rem;
   text-align: center;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 1.4rem;
-  max-width: 520px;
-  width: 90vw;
+  max-width: 640px;
+  width: 100%;
   box-shadow:
     0 0 0 1px rgba(255, 107, 107, 0.25),
     0 0 60px rgba(255, 107, 107, 0.12),
     0 0 120px rgba(0, 255, 255, 0.08),
     0 30px 80px rgba(0, 0, 0, 0.7);
-  animation: baTyCardPop 0.55s cubic-bezier(0.22, 1.5, 0.4, 1) forwards;
+  animation: baTyCardPop 0.3s ease-out forwards;
 }
 
 @keyframes baTyCardPop {
@@ -1464,7 +1462,7 @@
   border-radius: 26px;
   background: linear-gradient(135deg, #ff6b6b, #ff9f43, #00ffff, #9d4edd, #ff6b6b);
   background-size: 300% 300%;
-  animation: baTyBorderSpin 3s linear infinite;
+  animation: none;
   z-index: -1;
 }
 
@@ -1475,8 +1473,8 @@
 }
 
 .ba-thankyou-emoji {
-  font-size: 4rem;
-  animation: baTyBounce 1s cubic-bezier(0.22, 1.5, 0.4, 1) 0.3s both;
+  font-size: 2.4rem;
+  animation: baTyBounce 0.35s ease-out both;
   filter: drop-shadow(0 0 18px rgba(255, 159, 67, 0.6));
 }
 
@@ -1529,11 +1527,7 @@
 
 /* Stars / particles around the card */
 .ba-thankyou-stars {
-  position: absolute;
-  inset: 0;
-  border-radius: 24px;
-  pointer-events: none;
-  overflow: hidden;
+  display: none;
 }
 
 .ba-thankyou-star {
