@@ -363,9 +363,36 @@ app.post('/api/reports', async (req, res) => {
     if (!report.id || !report.reviewer || !report.originalTeam || !report.language || !Array.isArray(report.foundBugs)) {
       return res.status(400).json({ error: 'Incomplete bug report.' });
     }
+    // Each hunter has one current report for an exchanged submission. A later
+    // save replaces that report atomically, so the admin sees only the newest
+    // content and its latest submission time (which defines queue position).
+    report.reportSlot = report.reportSlot || `${report.reviewerRegistrationId || String(report.reviewer).trim().toLowerCase()}::${report.key || 'N/A'}::${String(report.language).toLowerCase()}`;
+    report.updatedAt = Number(report.updatedAt || report.timestamp || Date.now());
     await Registry.updateOne(
       { singletonId: 'registry' },
-      { $setOnInsert: { singletonId: 'registry' }, $push: { 'data.reports': report } },
+      [{
+        $set: {
+          data: {
+            $mergeObjects: [
+              { $ifNull: ['$data', {}] },
+              {
+                reports: {
+                  $concatArrays: [
+                    {
+                      $filter: {
+                        input: { $ifNull: ['$data.reports', []] },
+                        as: 'existing',
+                        cond: { $ne: ['$$existing.reportSlot', report.reportSlot] },
+                      },
+                    },
+                    [report],
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      }],
       { upsert: true }
     );
     res.status(201).json({ success: true, id: report.id });

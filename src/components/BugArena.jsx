@@ -1709,6 +1709,10 @@ const BugArena = ({ onAbort }) => {
 
   // ── Generate bug report ──
   const handleGenerateReport = async (isAutoSubmit = false) => {
+    if (!isAutoSubmit && globalEventPhase !== 'hunting') {
+      showToast('Bug reports can only be updated while the hunting phase is open.', 'error');
+      return;
+    }
     const validFound = foundBugs.filter(b => b.description.trim());
     if (validFound.length === 0) {
       showToast(isAutoSubmit ? 'Hunting ended with no completed bug report to submit.' : 'Describe at least one bug you found!', isAutoSubmit ? 'info' : 'error');
@@ -1744,6 +1748,11 @@ const BugArena = ({ onAbort }) => {
     // Sync report to cloud registry for Admin Matcher Tool
     const reportPayload = {
       id: 'R_' + Date.now(),
+      // This identity is stable for a team's review of one exchanged code.
+      // The server replaces this slot on every update, rather than adding a
+      // second card that would confuse the verification team.
+      reportSlot: `${registrationId || reviewer.trim().toLowerCase()}::${decodedData?.key || 'N/A'}::${(decodedData?.language || 'python').toLowerCase()}`,
+      reviewerRegistrationId: registrationId || '',
       reviewer,
       originalTeam,
       key: decodedData?.key || 'N/A',
@@ -1752,6 +1761,8 @@ const BugArena = ({ onAbort }) => {
       originalCreatedBugs: decodedData?.createdBugs || [],
       originalCode: decodedData?.code || '',
       timestamp: Date.now(),
+      updatedAt: Date.now(),
+      isUpdated: reportSubmitted,
     };
 
     try {
@@ -1778,7 +1789,8 @@ const BugArena = ({ onAbort }) => {
       showToast('Bug report generated & synced to Admin! (Copy it manually above)');
     }
 
-    // Lock submission after report is generated
+    // Keep the same form editable until the hunting phase ends. A later save
+    // replaces this report and receives a later queue position.
     setReportSubmitted(true);
   };
 
@@ -2992,38 +3004,6 @@ const BugArena = ({ onAbort }) => {
     return (
     <div className="ba-fade-in">
 
-      {/* ── THANK YOU MODAL — renders as full-screen overlay on submission ── */}
-      {reportSubmitted && (
-        <div className="ba-thankyou-overlay">
-          <div className="ba-thankyou-card">
-            {/* Burst star particles */}
-            <div className="ba-thankyou-stars">
-              {[...Array(10)].map((_, i) => (
-                <span
-                  key={i}
-                  className="ba-thankyou-star"
-                  style={{
-                    left: `${40 + Math.cos((i / 10) * Math.PI * 2) * 35}%`,
-                    top:  `${40 + Math.sin((i / 10) * Math.PI * 2) * 35}%`,
-                    background: ['#ff6b6b','#ff9f43','#00ffff','#9d4edd','#fbbf24','#4ade80'][i % 6],
-                    '--tx': `${(Math.random() - 0.5) * 120}px`,
-                    '--ty': `${(Math.random() - 0.5) * 120}px`,
-                    animationDelay: `${i * 0.07}s`,
-                  }}
-                />
-              ))}
-            </div>
-
-            <div className="ba-thankyou-emoji">🏆</div>
-            <h2 className="ba-thankyou-title">Report submitted</h2>
-            <p className="ba-thankyou-sub">
-              Your report is safely synced to the admin review queue. You can now wait for the event results.
-            </p>
-            <div className="ba-thankyou-badge">✓ Submission Locked</div>
-          </div>
-        </div>
-      )}
-
       <div className="ba-section-header">
         <div className="ba-section-line" />
         <h2 className="ba-section-title">🐛 Hunt the Bug!</h2>
@@ -3129,11 +3109,11 @@ const BugArena = ({ onAbort }) => {
                 <button
                   className="ba-neon-btn ba-btn-green"
                   onClick={handleGenerateReport}
-                  disabled={foundBugs.filter(b => b.description.trim()).length === 0 || reportSubmitted}
-                  title={reportSubmitted ? 'Report already submitted — submission locked' : ''}
+                  disabled={foundBugs.filter(b => b.description.trim()).length === 0}
+                  title={reportSubmitted ? 'Save your revision. It replaces the earlier report and moves to the latest queue position.' : ''}
                 >
                   <span className="ba-btn-icon">📋</span>
-                  {reportSubmitted ? '✓ Report Submitted' : 'Generate & Copy Report'}
+                  {reportSubmitted ? 'Update Report & Copy' : 'Generate & Copy Report'}
                 </button>
               </div>
             </div>
@@ -3164,7 +3144,6 @@ const BugArena = ({ onAbort }) => {
                           navigator.clipboard.writeText(reportGenerated);
                           showToast('Report copied again!');
                         }}
-                        disabled={reportSubmitted}
                       >
                         📋 Copy Report
                       </button>
@@ -3178,14 +3157,13 @@ const BugArena = ({ onAbort }) => {
                           setReportSubmitted(false);
                           setPhase('exchange');
                         }}
-                        disabled={reportSubmitted}
                       >
                         🔄 Review Another Code
                       </button>
                     </div>
                     {reportSubmitted && (
                       <div style={{ textAlign: 'center', marginTop: '0.6rem', color: '#00ffff', fontSize: '0.82rem', fontWeight: 700, letterSpacing: '0.1em' }}>
-                        ✓ SUBMISSION LOCKED
+                        ✓ SAVED — you may edit and update this same report until the hunting phase ends. Updates receive a new submission time.
                       </div>
                     )}
                   </>
@@ -3264,7 +3242,25 @@ const BugArena = ({ onAbort }) => {
     });
     const teamEntries = [...byParticipant.values()];
 
-    const reportsList = rawData.reports || [];
+    // Only retain the newest version of each team's report for each exchanged
+    // code. Legacy duplicate entries are also collapsed here defensively.
+    const latestReportsBySlot = new Map();
+    (Array.isArray(rawData.reports) ? rawData.reports : []).forEach(report => {
+      const reportSlot = report.reportSlot || `${report.reviewerRegistrationId || String(report.reviewer || '').trim().toLowerCase()}::${report.key || 'N/A'}::${String(report.language || '').toLowerCase()}`;
+      const previous = latestReportsBySlot.get(reportSlot);
+      if (!previous || Number(report.updatedAt || report.timestamp || 0) >= Number(previous.updatedAt || previous.timestamp || 0)) {
+        latestReportsBySlot.set(reportSlot, { ...report, reportSlot });
+      }
+    });
+    const languageQueueCounts = new Map();
+    const reportsList = [...latestReportsBySlot.values()]
+      .sort((a, b) => Number(a.updatedAt || a.timestamp || 0) - Number(b.updatedAt || b.timestamp || 0))
+      .map(report => {
+        const language = String(report.language || '').toLowerCase();
+        const queuePosition = (languageQueueCounts.get(language) || 0) + 1;
+        languageQueueCounts.set(language, queuePosition);
+        return { ...report, queuePosition };
+      });
 
     const statusColor = (s) => s === 'verified' ? '#4ade80' : s === 'rejected' ? '#ff5f56' : '#fbbf24';
     const statusBg = (s) => s === 'verified' ? 'rgba(74,222,128,0.1)' : s === 'rejected' ? 'rgba(255,95,86,0.1)' : 'rgba(251,191,36,0.1)';
@@ -4115,6 +4111,10 @@ const BugArena = ({ onAbort }) => {
                               MATCH #{idx + 1}
                             </span>
 
+                            <span style={{ background: 'rgba(157,78,221,0.17)', border: '1px solid rgba(199,125,255,0.55)', color: '#e0c2ff', borderRadius: '4px', padding: '0.15rem 0.55rem', fontSize: '0.72rem', fontWeight: 800 }}>
+                              ⏱ Queue #{r.queuePosition} in {langName}{r.isUpdated ? ' · Updated' : ''}
+                            </span>
+
                             {/* Intra-Language Integrity Badge */}
                             <span style={{
                               background: isLanguageMatched ? 'rgba(0, 255, 255, 0.15)' : 'rgba(255, 95, 86, 0.2)',
@@ -4129,7 +4129,7 @@ const BugArena = ({ onAbort }) => {
                             </span>
 
                             <span style={{ color: '#7a7a9e', fontSize: '0.72rem', fontFamily: 'Courier New, monospace' }}>
-                              KEY: {r.key}
+                              KEY: {r.key} · {new Date(r.updatedAt || r.timestamp || Date.now()).toLocaleTimeString()}
                             </span>
 
                             {analysis.isHighSpam && (
