@@ -345,11 +345,16 @@ app.post('/api/submissions', async (req, res) => {
     // client retains the same key for edits, so a resubmission overwrites only
     // that player's prior code.
     const keyPath = `data.${payload.key}`;
-    await Registry.updateOne(
-      { singletonId: 'registry' },
-      { $setOnInsert: { singletonId: 'registry' }, $set: { [keyPath]: payload } },
-      { upsert: true }
+    // Phase is enforced in the same database write filter. This is the
+    // authoritative lock: changing a browser screen or calling the API
+    // directly cannot save code after the organiser moves past coding.
+    const result = await Registry.updateOne(
+      { singletonId: 'registry', 'data.globalState.phase': 'coding' },
+      { $set: { [keyPath]: payload } }
     );
+    if (result.matchedCount !== 1) {
+      return res.status(409).json({ error: 'The coding phase has ended. Code submissions are locked.' });
+    }
     res.status(201).json({ success: true, key: payload.key });
   } catch (err) {
     console.error('Submission save error:', err);
@@ -368,8 +373,10 @@ app.post('/api/reports', async (req, res) => {
     // content and its latest submission time (which defines queue position).
     report.reportSlot = report.reportSlot || `${report.reviewerRegistrationId || String(report.reviewer).trim().toLowerCase()}::${report.key || 'N/A'}::${String(report.language).toLowerCase()}`;
     report.updatedAt = Number(report.updatedAt || report.timestamp || Date.now());
-    await Registry.updateOne(
-      { singletonId: 'registry' },
+    // Like code submissions, reports are guarded by the live event phase in
+    // MongoDB. This prevents a late edit even if a player holds an old page.
+    const result = await Registry.updateOne(
+      { singletonId: 'registry', 'data.globalState.phase': 'hunting' },
       [{
         $set: {
           data: {
@@ -393,8 +400,11 @@ app.post('/api/reports', async (req, res) => {
           },
         },
       }],
-      { upsert: true }
+      { upsert: false }
     );
+    if (result.matchedCount !== 1) {
+      return res.status(409).json({ error: 'The bug hunting phase has ended. Reports are locked.' });
+    }
     res.status(201).json({ success: true, id: report.id });
   } catch (err) {
     console.error('Report save error:', err);

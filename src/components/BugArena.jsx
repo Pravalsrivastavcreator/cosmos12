@@ -769,29 +769,6 @@ const BugArena = ({ onAbort }) => {
     return () => { clearInterval(intervalId); stream?.close(); };
   }, [isRegistered]);
 
-  // Auto-submit code if coding phase ends — only fires forward (exchange/hunting/post_event)
-  // Guard: isSetup ensures they're actually in the arena, not just polling
-  useEffect(() => {
-    if (
-      isSetup && teamName &&
-      (globalEventPhase === 'exchange' || globalEventPhase === 'hunting' || globalEventPhase === 'post_event') &&
-      phase === 'create' && !submittedKey && !isSubmitting
-    ) {
-      showToast('Coding phase ended! Auto-submitting your code...', 'error');
-      handleSubmitCode(true);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [globalEventPhase]);
-
-  // Auto-submit report if hunting phase ends — only fires when phase advances to post_event
-  useEffect(() => {
-    if (isSetup && teamName && globalEventPhase === 'post_event' && phase === 'hunt' && !reportSubmitted) {
-      showToast('Hunting phase ended! Auto-submitting your report...', 'error');
-      handleGenerateReport();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [globalEventPhase]);
-
   // The host phase is authoritative: players cannot keep editing a previous
   // phase after an event transition.
   const prevGlobalPhaseRef = React.useRef(globalEventPhase);
@@ -1539,6 +1516,10 @@ const BugArena = ({ onAbort }) => {
   // Uses a stable team-based slot key so re-submissions UPSERT the same entry
   // (admin panel always shows only the LATEST version)
   const handleSubmitCode = async (isAutoSubmit = false) => {
+    if (globalEventPhase !== 'coding') {
+      showToast('The coding phase has ended. Code editing and submission are locked.', 'error');
+      return;
+    }
     if (!isAutoSubmit && !isFullscreen) {
       showToast('Fullscreen mode is required before submitting.', 'error');
       return;
@@ -2604,7 +2585,7 @@ const BugArena = ({ onAbort }) => {
       );
     }
     
-    if (globalEventPhase !== 'coding' && !submittedKey) {
+    if (globalEventPhase !== 'coding') {
       return (
         <div className="ba-fade-in ba-waitroom">
           <div className="ba-waitroom-ring ba-waitroom-ring--red">
@@ -2619,7 +2600,7 @@ const BugArena = ({ onAbort }) => {
           <h2 className="ba-waitroom-title" style={{ color: '#ff5f56' }}>Coding Phase Closed</h2>
           <p className="ba-waitroom-desc">
             The coding window has closed.<br />
-            Your code has been automatically submitted. Head to the <strong>Exchange Portal</strong>.
+            No further code can be edited or submitted. Head to the <strong>Exchange Portal</strong>.
           </p>
           <div className="ba-waitroom-status ba-waitroom-status--red">
             <span className="ba-waitroom-pulse-dot ba-waitroom-pulse-dot--red" />
@@ -2972,7 +2953,7 @@ const BugArena = ({ onAbort }) => {
   };
 
   const renderHuntPhase = () => {
-    if (globalEventPhase === 'post_event') {
+    if (globalEventPhase !== 'hunting') {
       return (
         <div className="ba-fade-in ba-waitroom">
           <div className="ba-waitroom-ring ba-waitroom-ring--green">
@@ -2984,15 +2965,15 @@ const BugArena = ({ onAbort }) => {
             <span className="ba-waitroom-step-dot ba-waitroom-step-dot--green" />
             Phase 5 of 5 — Event Ended
           </div>
-          <h2 className="ba-waitroom-title" style={{ color: '#4ade80' }}>Hunting Phase Ended</h2>
+          <h2 className="ba-waitroom-title" style={{ color: '#4ade80' }}>{globalEventPhase === 'post_event' ? 'Hunting Phase Ended' : 'Bug Hunting Is Not Open'}</h2>
           <p className="ba-waitroom-desc">
-            The event has concluded.<br />
-            Your bug report has been <strong>automatically submitted</strong>.
-            Await the final results from the organizers.
+            {globalEventPhase === 'post_event'
+              ? 'The event has concluded. Bug reporting is now locked. Await the final results from the organizers.'
+              : 'Wait for the administrator to open the Bug Hunting phase. Reports cannot be edited or submitted yet.'}
           </p>
           <div className="ba-waitroom-status ba-waitroom-status--green">
             <span className="ba-waitroom-pulse-dot ba-waitroom-pulse-dot--green" />
-            All submissions locked — judging in progress
+            {globalEventPhase === 'post_event' ? 'All submissions locked — judging in progress' : 'Hunting submission locked'}
           </div>
           <div className="ba-waitroom-hint">
             🏆 Stay tuned for the final leaderboard!
