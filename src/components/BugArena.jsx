@@ -676,6 +676,10 @@ const BugArena = ({ onAbort }) => {
         setIsAdminLoggedIn(true);
         setPhase('admin');
         fetchAdminRegistryData();
+      } else {
+        // A legacy UI-only marker must never restore administrative access.
+        // The organizer needs a fresh server-authenticated login instead.
+        sessionStorage.removeItem('ba_admin_session');
       }
     } catch { /* storage unavailable */ }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1268,6 +1272,17 @@ const BugArena = ({ onAbort }) => {
         headers: { 'Content-Type': 'application/json', 'x-admin-session': adminAuthToken },
         body: JSON.stringify({ reportId, teamName, registrationId: regId }),
       });
+      if (res.status === 401) {
+        try {
+          sessionStorage.removeItem('ba_admin_session');
+          sessionStorage.removeItem('ba_admin_token');
+        } catch {}
+        setAdminAuthToken('');
+        setIsAdminLoggedIn(false);
+        setPhase('create');
+        setAdminModalOpen(true);
+        throw new Error('Your admin session expired. Please log in again, then approve the re-entry request.');
+      }
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || 'Unlock was rejected by the server.');
