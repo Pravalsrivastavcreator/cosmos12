@@ -4252,6 +4252,22 @@ const BugArena = ({ onAbort }) => {
                               {' '}({analysis.missedCreatorBugs.length} stealth bugs defended)
                             </span>
                           </div>
+
+                          {/* Deliberately compact decision snapshot: admins can
+                              understand the match before opening any detail. */}
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '0.45rem', marginTop: '0.85rem', maxWidth: '760px' }}>
+                            {[
+                              ['Creator planted', (creatorData?.createdBugs || r.originalCreatedBugs || []).length, '#ff6b6b'],
+                              ['Hunter reported', (r.foundBugs || []).filter(b => b.description?.trim()).length, '#4ade80'],
+                              ['To confirm', analysis.pairs.length, '#00ffff'],
+                              ['Needs attention', analysis.unmatchedHunterBugs.length + analysis.missedCreatorBugs.length, '#fbbf24'],
+                            ].map(([label, value, color]) => (
+                              <div key={label} style={{ background: 'rgba(0,0,0,0.3)', border: `1px solid ${color}33`, borderRadius: '7px', padding: '0.35rem 0.55rem' }}>
+                                <div style={{ color: '#8888aa', fontSize: '0.64rem', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
+                                <div style={{ color, fontWeight: 900, fontSize: '1rem', marginTop: '0.05rem' }}>{value}</div>
+                              </div>
+                            ))}
+                          </div>
                         </div>
 
                         {/* Winner Decision Actions */}
@@ -4437,12 +4453,37 @@ const BugArena = ({ onAbort }) => {
                             </span>
                           </div>
 
-                          <CodeEditor
-                            code={creatorData?.code || r.originalCode}
-                            language={(creatorData?.language || r.language || 'python')}
-                            readOnly
-                            highlightLine={currentHighlightedLine}
-                          />
+                          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.6fr) minmax(260px, 0.8fr)', gap: '1rem', alignItems: 'start' }}>
+                            <CodeEditor
+                              code={creatorData?.code || r.originalCode}
+                              language={(creatorData?.language || r.language || 'python')}
+                              readOnly
+                              highlightLine={currentHighlightedLine}
+                            />
+                            <div style={{ background: 'rgba(8, 12, 25, 0.9)', border: '1px solid rgba(0,255,255,0.22)', borderRadius: '10px', overflow: 'hidden' }}>
+                              <div style={{ padding: '0.65rem 0.8rem', color: '#00ffff', fontWeight: 900, fontSize: '0.74rem', textTransform: 'uppercase', letterSpacing: '0.07em', borderBottom: '1px solid rgba(0,255,255,0.15)' }}>
+                                Review checklist
+                              </div>
+                              <div style={{ padding: '0.7rem', display: 'flex', flexDirection: 'column', gap: '0.65rem', maxHeight: '390px', overflowY: 'auto' }}>
+                                <div>
+                                  <div style={{ color: '#ff7777', fontSize: '0.7rem', fontWeight: 900, marginBottom: '0.35rem' }}>CREATOR PLANTED</div>
+                                  {(creatorData?.createdBugs || r.originalCreatedBugs || []).map((bug, bugIndex) => (
+                                    <button key={`creator-${bugIndex}`} type="button" onClick={() => setHighlightedCodeLine(prev => ({ ...prev, [r.id]: bug.lineNumber }))} style={{ width: '100%', textAlign: 'left', background: 'rgba(255,95,86,0.06)', border: '1px solid rgba(255,95,86,0.18)', borderRadius: '6px', color: '#e4e4f0', padding: '0.45rem', marginBottom: '0.35rem', cursor: 'pointer', fontSize: '0.74rem' }}>
+                                      <strong style={{ color: '#ff7777' }}>L{bug.lineNumber || '—'}</strong> · {bug.description || 'No description'}
+                                    </button>
+                                  ))}
+                                </div>
+                                <div>
+                                  <div style={{ color: '#4ade80', fontSize: '0.7rem', fontWeight: 900, marginBottom: '0.35rem' }}>HUNTER REPORTED</div>
+                                  {(r.foundBugs || []).filter(b => b.description?.trim()).map((bug, bugIndex) => (
+                                    <button key={`hunter-${bugIndex}`} type="button" onClick={() => setHighlightedCodeLine(prev => ({ ...prev, [r.id]: bug.lineNumber }))} style={{ width: '100%', textAlign: 'left', background: 'rgba(74,222,128,0.06)', border: '1px solid rgba(74,222,128,0.18)', borderRadius: '6px', color: '#e4e4f0', padding: '0.45rem', marginBottom: '0.35rem', cursor: 'pointer', fontSize: '0.74rem' }}>
+                                      <strong style={{ color: '#4ade80' }}>L{bug.lineNumber || '—'}</strong> · {bug.description}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
                         </div>
                       )}
 
