@@ -125,6 +125,20 @@ const publishPhase = (globalState) => {
 };
 const publishAdminAlert = (alert) => publishSse(adminAlertSubscribers, 'proctoring-alert', alert);
 
+// Administrative mutations are authorized by a short-lived server session,
+// never by a client-side UI flag alone.
+const adminSessions = new Map();
+const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+function requireAdmin(req, res, next) {
+  const token = req.get('x-admin-session');
+  const expiresAt = token && adminSessions.get(token);
+  if (!expiresAt || expiresAt < Date.now()) {
+    if (token) adminSessions.delete(token);
+    return res.status(401).json({ error: 'Admin authentication is required for this action.' });
+  }
+  next();
+}
+
 // One cached, coalesced read prevents a 100-student join from triggering 100
 // full registry document reads at the same time. Phase writes refresh this
 // immediately, so clients still receive live transitions through SSE.
@@ -216,7 +230,7 @@ app.get('/api/event-phase/stream', (req, res) => {
   req.on('close', () => { clearInterval(heartbeat); phaseSubscribers.delete(res); });
 });
 
-app.patch('/api/event-phase', async (req, res) => {
+app.patch('/api/event-phase', requireAdmin, async (req, res) => {
   try {
     const { phase } = req.body;
     const allowed = ['pre_event', 'coding', 'exchange', 'hunting', 'post_event'];
@@ -271,8 +285,10 @@ app.post('/api/admin/login', adminLoginLimiter, (req, res) => {
     username.trim() === ADMIN_USER &&
     password === ADMIN_PASS
   ) {
+    const token = crypto.randomBytes(32).toString('hex');
+    adminSessions.set(token, Date.now() + ADMIN_SESSION_TTL_MS);
     console.log(`👑 Admin login at ${new Date().toISOString()}`);
-    return res.json({ success: true });
+    return res.json({ success: true, token });
   }
   console.warn(`⚠️  Failed admin login attempt for username: "${username}"`);
   res.status(401).json({ error: 'Invalid credentials.' });
@@ -303,7 +319,7 @@ app.get('/api/registry', async (req, res) => {
   }
 });
 
-app.put('/api/registry', async (req, res) => {
+app.put('/api/registry', requireAdmin, async (req, res) => {
   try {
     const doc = await getRegistryDoc();
     doc.data = req.body;
@@ -386,7 +402,7 @@ app.post('/api/reports', async (req, res) => {
   }
 });
 
-app.patch('/api/verifications/:reportId', async (req, res) => {
+app.patch('/api/verifications/:reportId', requireAdmin, async (req, res) => {
   try {
     const reportId = req.params.reportId;
     if (!reportId || !req.body?.winner) return res.status(400).json({ error: 'A winner decision is required.' });
@@ -497,7 +513,7 @@ app.get('/api/registrations/stats', async (req, res) => {
 });
 
 // PATCH /api/registrations/:id/verify — Admin: approve or reject
-app.patch('/api/registrations/:id/verify', async (req, res) => {
+app.patch('/api/registrations/:id/verify', requireAdmin, async (req, res) => {
   try {
     const { status, adminNote } = req.body;
     if (!['verified', 'rejected'].includes(status)) {
@@ -770,11 +786,12 @@ app.get('/api/cheat-reports/lock-status/:identifier', async (req, res) => {
     }).lean();
 
     if (!report) {
-      // If no report found or admin dismissed it, the team is not locked
-      return res.json({ noReport: true, locked: false, reentryApproved: true, reentryRequested: false });
+      // A missing record is never approval. This prevents a reload/race from
+      // granting access before the administrator explicitly approves it.
+      return res.json({ noReport: true, locked: false, reentryApproved: false, reentryRequested: false });
     }
 
-    const isApproved = report.reentryApproved === true || report.adminUnlocked === true || report.locked === false;
+    const isApproved = report.reentryApproved === true || report.adminUnlocked === true;
 
     res.json({
       _id:              report._id,
@@ -880,17 +897,17 @@ const handleReentryApproval = async (payload, res) => {
 };
 
 // POST /api/cheat-reports/approve-reentry — Admin approves re-entry
-app.post('/api/cheat-reports/approve-reentry', (req, res) => {
+app.post('/api/cheat-reports/approve-reentry', requireAdmin, (req, res) => {
   handleReentryApproval(req.body, res);
 });
 
 // PATCH /api/cheat-reports/:id/approve-reentry — Admin approves re-entry
-app.patch('/api/cheat-reports/:id/approve-reentry', (req, res) => {
+app.patch('/api/cheat-reports/:id/approve-reentry', requireAdmin, (req, res) => {
   handleReentryApproval({ id: req.params.id, ...req.body }, res);
 });
 
 // DELETE /api/cheat-reports/:id/dismiss — Admin: remove a report
-app.delete('/api/cheat-reports/:id/dismiss', async (req, res) => {
+app.delete('/api/cheat-reports/:id/dismiss', requireAdmin, async (req, res) => {
   try {
     await CheatReport.findByIdAndDelete(req.params.id);
     res.json({ success: true });
@@ -900,7 +917,7 @@ app.delete('/api/cheat-reports/:id/dismiss', async (req, res) => {
 });
 
 // PATCH /api/cheat-reports/:id/unlock — legacy compat
-app.patch('/api/cheat-reports/:id/unlock', (req, res) => {
+app.patch('/api/cheat-reports/:id/unlock', requireAdmin, (req, res) => {
   handleReentryApproval({ id: req.params.id, ...req.body }, res);
 });
 

@@ -563,6 +563,7 @@ const BugArena = ({ onAbort }) => {
 
   // ── Admin Portal State ──
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
+  const [adminAuthToken, setAdminAuthToken] = useState('');
   const [isAdminAuthenticating, setIsAdminAuthenticating] = useState(false);
   const [adminModalOpen, setAdminModalOpen] = useState(false);
   const [adminActiveTab, setAdminActiveTab] = useState('registrations'); // 'registrations' | 'teams' | 'matcher' | 'compare' | 'proctoring'
@@ -669,7 +670,9 @@ const BugArena = ({ onAbort }) => {
   // data is always fetched again, so the displayed event state stays current.
   useEffect(() => {
     try {
-      if (sessionStorage.getItem('ba_admin_session') === 'true') {
+      const savedAdminToken = sessionStorage.getItem('ba_admin_token');
+      if (savedAdminToken) {
+        setAdminAuthToken(savedAdminToken);
         setIsAdminLoggedIn(true);
         setPhase('admin');
         fetchAdminRegistryData();
@@ -829,7 +832,7 @@ const BugArena = ({ onAbort }) => {
         }
 
         // ONLY unlock if admin explicitly approved or cleared
-        if (data.reentryApproved === true || (data.locked === false && data.noReport !== true)) {
+        if (data.reentryApproved === true) {
           setIsLocked(false);
           setCheatWarnings(0);
           setReentryRequested(false);
@@ -980,21 +983,23 @@ const BugArena = ({ onAbort }) => {
     }
   }, [globalEventPhase, getFullscreenElement]);
 
-  // Register active contest session with server (so mid-contest reload/exit is tracked)
+  // Register an active contest only after native fullscreen succeeds. A student
+  // who is still on the fullscreen prompt has not started the contest and must
+  // not be penalized for reloading that prompt.
   useEffect(() => {
-    if (isSetup && isRegistered && !isAdminLoggedIn && (phase === 'create' || phase === 'hunt') && registrationId) {
+    if (isSetup && isFullscreen && isRegistered && !isAdminLoggedIn && (phase === 'create' || phase === 'hunt') && registrationId) {
       fetch(`${SERVER_BASE}/api/arena-session/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ registrationId, teamName, phase }),
       }).catch(() => {});
     }
-  }, [isSetup, isRegistered, isAdminLoggedIn, phase, registrationId, teamName]);
+  }, [isSetup, isFullscreen, isRegistered, isAdminLoggedIn, phase, registrationId, teamName]);
 
   // Proctoring is ONLY active when user is in code-writing phases
   // (not during registration, setup, admin mode, or while locked / in unlock grace period)
   const isProctoringActive =
-    isSetup && isRegistered && (phase === 'create' || phase === 'hunt') && !isAdminLoggedIn && !isLocked && !unlockGracePeriod;
+    isSetup && isFullscreen && isRegistered && (phase === 'create' || phase === 'hunt') && !isAdminLoggedIn && !isLocked && !unlockGracePeriod;
 
   useEffect(() => {
     if (!isProctoringActive) return; // Guard: only run during active code phases
@@ -1243,7 +1248,11 @@ const BugArena = ({ onAbort }) => {
   // Admin dismisses / clears a cheat report
   const handleDismissCheatReport = async (reportId) => {
     try {
-      await fetch(`${SERVER_BASE}/api/cheat-reports/${reportId}/dismiss`, { method: 'DELETE' });
+      const response = await fetch(`${SERVER_BASE}/api/cheat-reports/${reportId}/dismiss`, {
+        method: 'DELETE',
+        headers: { 'x-admin-session': adminAuthToken },
+      });
+      if (!response.ok) throw new Error('Dismissal was rejected by the server.');
       setAdminCheatReports(prev => prev.filter(r => r._id !== reportId));
       showToast('Cheat report dismissed.');
     } catch (e) {
@@ -1256,22 +1265,18 @@ const BugArena = ({ onAbort }) => {
     try {
       const res = await fetch(`${SERVER_BASE}/api/cheat-reports/approve-reentry`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-admin-session': adminAuthToken },
         body: JSON.stringify({ reportId, teamName, registrationId: regId }),
       });
-      if (res.ok) {
-        setAdminCheatReports(prev => prev.map(r => r._id === reportId ? { ...r, reentryApproved: true, adminUnlocked: true, locked: false, reentryRequested: false } : r));
-        showToast(`✅ ${teamName} has been unlocked and can re-enter.`);
-        fetchAdminRegistryData();
-      } else {
-        // Fallback to patch
-        await fetch(`${SERVER_BASE}/api/cheat-reports/${reportId}/approve-reentry`, { method: 'PATCH' });
-        setAdminCheatReports(prev => prev.map(r => r._id === reportId ? { ...r, reentryApproved: true, adminUnlocked: true, locked: false, reentryRequested: false } : r));
-        showToast(`✅ ${teamName} has been unlocked and can re-enter.`);
-        fetchAdminRegistryData();
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Unlock was rejected by the server.');
       }
+      setAdminCheatReports(prev => prev.map(r => r._id === reportId ? { ...r, reentryApproved: true, adminUnlocked: true, locked: false, reentryRequested: false } : r));
+      showToast(`✅ ${teamName} has been unlocked and can re-enter.`);
+      fetchAdminRegistryData();
     } catch (e) {
-      showToast('Could not unlock — server error', 'error');
+      showToast(e.message || 'Could not unlock — server error', 'error');
     }
   };
 
@@ -1320,11 +1325,17 @@ const BugArena = ({ onAbort }) => {
         }),
       });
       if (res.ok) {
+        const data = await res.json();
+        if (!data.token) throw new Error('Missing admin session token');
+        setAdminAuthToken(data.token);
         setIsAdminLoggedIn(true);
         setAdminModalOpen(false);
         setPhase('admin');
         setAdminActiveTab('registrations');
-        try { sessionStorage.setItem('ba_admin_session', 'true'); } catch {}
+        try {
+          sessionStorage.setItem('ba_admin_session', 'true');
+          sessionStorage.setItem('ba_admin_token', data.token);
+        } catch {}
         fetchAdminRegistryData();
         showToast('Welcome! Portal unlocked.');
       } else {
@@ -1341,7 +1352,11 @@ const BugArena = ({ onAbort }) => {
   const handleAdminLogout = () => {
     // The admin view is restored only from this session marker after a reload,
     // so it must be removed on logout as well as updating React state.
-    try { sessionStorage.removeItem('ba_admin_session'); } catch {}
+    try {
+      sessionStorage.removeItem('ba_admin_session');
+      sessionStorage.removeItem('ba_admin_token');
+    } catch {}
+    setAdminAuthToken('');
     setIsAdminLoggedIn(false);
     setAdminRegistryData(null);
     setAdminRegistrations([]);
@@ -1402,7 +1417,7 @@ const BugArena = ({ onAbort }) => {
     try {
       const res = await fetch(`${SERVER_BASE}/api/registrations/${registrationId}/verify`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-admin-session': adminAuthToken },
         body: JSON.stringify({ status, adminNote: adminNoteInput }),
       });
       const data = await res.json();
@@ -2205,7 +2220,7 @@ const BugArena = ({ onAbort }) => {
       };
       const response = await fetch(`${SERVER_BASE}/api/verifications/${encodeURIComponent(reportId)}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-admin-session': adminAuthToken },
         body: JSON.stringify(decision),
       });
       if (!response.ok) throw new Error('Decision save failed');
@@ -3198,7 +3213,7 @@ const BugArena = ({ onAbort }) => {
     try {
       const response = await fetch(`${SERVER_BASE}/api/event-phase`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-admin-session': adminAuthToken },
         body: JSON.stringify({ phase: newPhase }),
       });
       if (!response.ok) throw new Error('Phase update rejected');
@@ -3270,7 +3285,7 @@ const BugArena = ({ onAbort }) => {
                         if(window.prompt('Type WIPE to delete all submitted codes & bug reports from the database. (Registrations & Cheat history remain)') === 'WIPE') {
                           try {
                             const newReg = { globalState: { phase: 'pre_event', history: [], lastChanged: Date.now() }, reports: [] };
-                            await fetch(REGISTRY_URL, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(newReg) });
+                            await fetch(REGISTRY_URL, { method: 'PUT', headers: {'Content-Type': 'application/json', 'x-admin-session': adminAuthToken}, body: JSON.stringify(newReg) });
                             setGlobalEventPhase('pre_event');
                             fetchAdminRegistryData();
                             showToast('All codes wiped and event reset!', 'success');
@@ -4830,7 +4845,7 @@ const BugArena = ({ onAbort }) => {
                     try {
                       const res = await fetch(`${SERVER_BASE}/api/cheat-reports/lock-status/${encodeURIComponent(identifier)}`);
                       const data = await res.json();
-                      if (data.reentryApproved === true || (data.locked === false && data.noReport !== true)) {
+                      if (data.reentryApproved === true) {
                         setIsLocked(false);
                         setCheatWarnings(0);
                         setReentryRequested(false);
