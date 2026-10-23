@@ -340,57 +340,14 @@ app.post('/api/submissions', async (req, res) => {
     if (!/^[A-Z0-9]{6}$/.test(payload.key || '') || !payload.team || !payload.code || !payload.language) {
       return res.status(400).json({ error: 'A valid key, team, language, and code are required.' });
     }
-    const ownerRegistrationId = String(payload.registrationId || '');
-    const ownerTeam = String(payload.team || '').trim().toLowerCase();
-    // A participant may submit again after editing. Filter out every previous
-    // submission for that participant before writing the latest version, even
-    // if their browser generated a different key after a reconnect.
+    // A single dotted-path $set is atomic in MongoDB: concurrent students write
+    // separate keys without reading/replacing the whole shared registry. The
+    // client retains the same key for edits, so a resubmission overwrites only
+    // that player's prior code.
+    const keyPath = `data.${payload.key}`;
     await Registry.updateOne(
       { singletonId: 'registry' },
-      [{
-        $set: {
-          data: {
-            $arrayToObject: {
-              $concatArrays: [
-                {
-                  $filter: {
-                    input: { $objectToArray: { $ifNull: ['$data', {}] } },
-                    as: 'entry',
-                    cond: {
-                      // $cond is deliberately used instead of $or: Mongo can
-                      // evaluate every $or branch, which made metadata arrays
-                      // (reports) reach $toLower and reject a code submission.
-                      $cond: [
-                        { $in: ['$$entry.k', ['reports', 'globalState', 'verifications']] },
-                        true,
-                        {
-                          $and: [
-                            { $ne: [{ $ifNull: ['$$entry.v.registrationId', ''] }, ownerRegistrationId] },
-                            {
-                              $ne: [
-                                {
-                                  $toLower: {
-                                    $convert: {
-                                      input: { $ifNull: ['$$entry.v.team', ''] },
-                                      to: 'string', onError: '', onNull: '',
-                                    },
-                                  },
-                                },
-                                ownerTeam,
-                              ],
-                            },
-                          ],
-                        },
-                      ],
-                    },
-                  },
-                },
-                [{ k: payload.key, v: payload }],
-              ],
-            },
-          },
-        },
-      }],
+      { $setOnInsert: { singletonId: 'registry' }, $set: { [keyPath]: payload } },
       { upsert: true }
     );
     res.status(201).json({ success: true, key: payload.key });
